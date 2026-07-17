@@ -13,7 +13,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- SOZLAMALAR ---
-BOT_TOKEN = "8648555950:AAGRoZ6LfMlh7slXlHgyF6ebiq6bFT4ksqw"
+BOT_TOKEN = "8482178284:AAGzq9lzZEV6JlOkBA3_TvDcX37NQA_uB_M"
 ADMINS = [8317043750, 6139120765]  # Admin ID raqamlari
 PAYMENTS_GROUP_LINK = "https://t.me/isbot111"  # To'lovlar guruh linki
 GOOGLE_SHEET_NAME = "Openbudjet"  # Google Sheets jadvalingiz nomi
