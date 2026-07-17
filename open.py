@@ -15,8 +15,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 # --- SOZLAMALAR ---
 BOT_TOKEN = "8482178284:AAGzq9lzZEV6JlOkBA3_TvDcX37NQA_uB_M"
 
-# 🔑 Kelajakda yana 8 ta admin qo'shish uchun shu ro'yxatni o'ziga ID'larni yozib ketaverasiz:
-ADMINS = [8317043750, 6139120765, 6200218839]  
+ADMINS = [8317043750, 6139120765, 7393342078]  
 
 PAYMENTS_GROUP_LINK = "https://t.me/isbot111"  
 GOOGLE_SHEET_NAME = "Openbudjet"  
@@ -26,10 +25,12 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# 🔒 Foydalanuvchini aynan qaysi Admin ID band qilganini saqlash: {user_id: admin_id}
 claimed_users = {}
-# 👤 Adminning ismini saqlash (Xabarlarda ko'rsatish uchun): {user_id: "Admin Ismi"}
 claimed_admin_names = {}
+
+# 🆕 YANGILIK: Barcha adminlarga yuborilgan xabarlar ID sini saqlaymiz 
+# (Keyin tugmani hammadan o'chirib tashlash uchun)
+admin_message_ids = {}
 
 
 # --- GOOGLE SHEETS INTEGRATSIYASI ---
@@ -93,7 +94,6 @@ def main_menu():
     builder.adjust(1, 2)
     return builder.as_markup(resize_keyboard=True)
 
-
 def phone_share_keyboard():
     builder = ReplyKeyboardBuilder()
     builder.button(text="📱 Telefon raqamni yuborish", request_contact=True)
@@ -129,10 +129,9 @@ async def start_voting(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await state.clear() 
     
-    if user_id in claimed_users:
-        del claimed_users[user_id]
-    if user_id in claimed_admin_names:
-        del claimed_admin_names[user_id]
+    # Eskidan qolgan datalarni tozalash
+    if user_id in claimed_users: del claimed_users[user_id]
+    if user_id in claimed_admin_names: del claimed_admin_names[user_id]
         
     await message.answer(
         "Iltimos, ovoz beradigan telefon raqamingizni quyidagi tugma orqali yuboring yoki qo'lda yozib kiriting:\n\n<b>(Format: +998901234567)</b>",
@@ -174,9 +173,12 @@ async def process_phone(message: types.Message, state: FSMContext):
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Qabul qilish (Band qilish)", callback_data=f"claim_{user_id}")
 
+    # Barcha adminlarga xabarlarni jo'natish va xabar ID larini saqlab qolish
+    admin_message_ids[user_id] = {}
+    
     for admin in ADMINS:
         try:
-            await bot.send_message(
+            msg = await bot.send_message(
                 admin,
                 f"📱 <b>Yangi raqam keldi!</b>\n\n"
                 f"👤 Foydalanuvchi: {full_name}\n"
@@ -186,20 +188,21 @@ async def process_phone(message: types.Message, state: FSMContext):
                 f"Kim birinchi bo'lib qabul qilsa, o'sha admin ishlaydi.",
                 parse_mode="HTML", reply_markup=builder.as_markup()
             )
+            admin_message_ids[user_id][admin] = msg.message_id
         except Exception:
             pass
 
     await message.answer("Raqamingiz qabul qilindi. Operatorlarimiz tez orada uni tizimga kiritishadi, kuting...", reply_markup=main_menu())
 
 
-# --- 🔒 ADMIN BAND QILISH (ERTA HARAKAT QILGANI YUTADI) ---
+# --- 🔒 ADMIN BAND QILISH ---
 @dp.callback_query(F.data.startswith("claim_"))
 async def admin_claim(callback: types.CallbackQuery):
     user_id = int(callback.data.split("_")[1])
     admin_id = callback.from_user.id
     admin_name = callback.from_user.full_name
 
-    # 🛑 TEKSHIRUV: Agar bu foydalanuvchini kimdir allaqachon olgan bo'lsa
+    # 🛑 TEKSHIRUV
     if user_id in claimed_users:
         already_admin_name = claimed_admin_names.get(user_id, "Boshqa admin")
         await callback.answer(f"❌ Kech qoldingiz! Bu so'rovni {already_admin_name} qabul qilib bo'lgan.", show_alert=True)
@@ -208,21 +211,44 @@ async def admin_claim(callback: types.CallbackQuery):
     # 🔑 Birinchi bosgan adminni xotiraga qulflaymiz
     claimed_users[user_id] = admin_id
     claimed_admin_names[user_id] = admin_name
-
-    # Tugmani o'zgartiramiz, boshqa adminlar kelib ko'rsa ham kim olganini bilsin
-    await callback.message.edit_text(
-        f"{callback.message.text}\n\n🔒 <b>Ushbu raqamni admin [{admin_name}] o'ziga qulfladi!</b>",
-        parse_mode="HTML"
-    )
     await callback.answer("Siz ushbu foydalanuvchini muvaffaqiyatli band qildingiz!")
 
+    # 🔄 FSM dan foydalanuvchi ma'lumotlarini olish
     user_state = dp.fsm.resolve_context(bot, chat_id=user_id, user_id=user_id)
     await user_state.set_state(VoteState.waiting_for_code)
     await user_state.update_data(admin_id=admin_id)
-
+    
     user_data = await user_state.get_data()
-    log_to_sheets(user_id=user_id, phone=user_data.get("phone", ""), status="Admin qabul qildi", admin_name=admin_name)
+    full_name = user_data.get("full_name", "Noma'lum")
+    username = user_data.get("username", "")
+    phone = user_data.get("phone", "")
+    
+    log_to_sheets(user_id=user_id, phone=phone, status="Admin qabul qildi", admin_name=admin_name)
 
+    # 💣 ENG ASOSIY QISM: Barcha adminlarning xatidan tugmani o'chirib, tekstni yangilaymiz!
+    edited_text = (
+        f"📱 <b>Yangi raqam keldi!</b>\n\n"
+        f"👤 Foydalanuvchi: {full_name}\n"
+        f"🌐 Username: @{username if username else 'yoq'}\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"📞 Raqam: <code>{phone}</code>\n\n"
+        f"🔒 <b>Ushbu raqamni admin [{admin_name}] qabul qildi!</b>"
+    )
+
+    if user_id in admin_message_ids:
+        for a_id, m_id in admin_message_ids[user_id].items():
+            try:
+                await bot.edit_message_text(
+                    text=edited_text,
+                    chat_id=a_id,
+                    message_id=m_id,
+                    parse_mode="HTML",
+                    reply_markup=None  # Ana shu qator TUGMANI yo'q qiladi!
+                )
+            except Exception:
+                pass
+
+    # Foydalanuvchiga SMS kod yuborilishini so'rash
     msg = await bot.send_message(
         user_id,
         "Sizning raqamingiz tizimga kiritildi! 📥\n"
@@ -254,8 +280,10 @@ async def countdown_timer(user_id, message_id, state: FSMContext):
     if current_state == VoteState.waiting_for_code:
         user_data = await state.get_data()
         await state.clear()
+        
         if user_id in claimed_users: del claimed_users[user_id]
         if user_id in claimed_admin_names: del claimed_admin_names[user_id]
+        if user_id in admin_message_ids: del admin_message_ids[user_id]
         
         await bot.send_message(user_id, "⏱ Vaqt tugadi. Iltimos, qaytadan urinib ko'ring (Ovoz berish tugmasini bosing).")
         log_to_sheets(user_id=user_id, phone=user_data.get("phone", ""), status="Vaqt tugadi")
@@ -330,7 +358,6 @@ async def handle_admin_check(callback: types.CallbackQuery):
     admin_id = callback.from_user.id
     admin_name = callback.from_user.full_name
 
-    # 🛑 XAVFSIZLIK TEKSHIRUVI: Skrinshotni tasdiqlash tugmasini ham faqat o'sha foydalanuvchini qabul qilgan admin bosa oladi
     if claimed_users.get(user_id) != admin_id:
         owner_name = claimed_admin_names.get(user_id, "Boshqa admin")
         await callback.answer(f"❌ Bu foydalanuvchi {owner_name} ga tegishli! Siz qaror qabul qila olmaysiz.", show_alert=True)
@@ -360,6 +387,7 @@ async def handle_admin_check(callback: types.CallbackQuery):
         
         if user_id in claimed_users: del claimed_users[user_id]
         if user_id in claimed_admin_names: del claimed_admin_names[user_id]
+        if user_id in admin_message_ids: del admin_message_ids[user_id]
 
         await bot.send_message(user_id, "Uzr, tekshiruv davomida bu raqam orqali avval ham ovoz berilganligi aniqlandi. ❌", reply_markup=main_menu())
 
@@ -389,9 +417,11 @@ async def process_card(message: types.Message, state: FSMContext):
 
     await message.answer("Ma'lumotlar saqlandi. ⏱ 1 soat ichida to'lov amalga oshiriladi. Rahmat!", reply_markup=main_menu())
     
-    # Ish butunlay tugagandan keyin xotirani tozalaymiz
+    # Xotirani tozalash
     if user_id in claimed_users: del claimed_users[user_id]
     if user_id in claimed_admin_names: del claimed_admin_names[user_id]
+    if user_id in admin_message_ids: del admin_message_ids[user_id]
+    
     await state.clear()
 
 
