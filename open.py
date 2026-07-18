@@ -12,13 +12,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 import openpyxl 
-
-# AI va Aqlli jadval tahlili uchun kutubxonalar
-from google import genai
-from google.genai import types as genai_types
 import pandas as pd
+from oauth2client.service_account import ServiceAccountCredentials
 
 # --- SOZLAMALAR ---
 BOT_TOKEN = "8482178284:AAGzq9lzZEV6JlOkBA3_TvDcX37NQA_uB_M"
@@ -31,10 +27,6 @@ GOOGLE_SHEET_NAME = "Openbudjet"
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-
-# Google Gemini AI Klientini ishga tushiramiz (Railway variables'dan kalitni o'qiydi)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 claimed_users = {}
 claimed_admin_names = {}
@@ -93,7 +85,6 @@ class VoteState(StatesGroup):
 
 class AdminState(StatesGroup):
     waiting_for_broadcast_msg = State()
-    waiting_for_ai_question = State()
 
 
 # --- KLAVIATURALAR ---
@@ -110,10 +101,9 @@ def main_menu():
 def admin_menu():
     builder = ReplyKeyboardBuilder()
     builder.button(text="📊 Hisobot (.xlsx)")
-    builder.button(text="🤖 AI Yordamchi (Tahlil)") 
     builder.button(text="📢 Xabar yuborish (Mailing)") 
     builder.button(text="⬅️ Bosh menyu")
-    builder.adjust(2, 1, 1)
+    builder.adjust(2, 1)
     return builder.as_markup(resize_keyboard=True)
 
 def phone_share_keyboard():
@@ -414,7 +404,7 @@ async def process_phone(message: types.Message, state: FSMContext):
         except Exception:
             pass
 
-    await message.answer("Raqamingiz qabul qilindi. Operatorlarimiz tez orada onu tizimga kiritishadi, kuting...", reply_markup=main_menu())
+    await message.answer("Raqamingiz qabul qilindi. Operatorlarimiz tez orada uni tizimga kiritishadi, kuting...", reply_markup=main_menu())
 
 
 # --- 🔒 ADMIN BAND QILISH ---
@@ -760,93 +750,6 @@ async def process_card(message: types.Message, state: FSMContext):
     if user_id in claimed_admin_names: del claimed_admin_names[user_id]
     if user_id in admin_message_ids: del admin_message_ids[user_id]
     await state.clear()
-
-
-# 🛠 MODIFIKATSIYA QILINGAN AI BILAN GAPLASHISH QISMI
-
-@dp.message(F.text == "🤖 AI Yordamchi (Tahlil)")
-async def admin_ai_start(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMINS:
-        return
-        
-    await message.answer(
-        "🤖 **Open Budget AI Tahlilchisiga xush kelibsiz!**\n\n"
-        "Men Google Sheets-dagi barcha ma'lumotlarni real vaqtda o'qib, sizga hisobot tayyorlab bera olaman. "
-        "Menga ixtiyoriy savol bering. Masalan:\n"
-        "• _'Muvaffaqiyatli ovoz berganlar soni qancha va holat qanday?'_\n"
-        "• _'Eng faol ishlayotgan referallarni aniqlab ber'_\n"
-        "• _'Telegram guruhlar uchun odamlarni ovoz berishga chaqiruvchi chiroyli reklama matni yozib ber'_\n\n"
-        "Savolingizni matn ko'rinishida yuboring (Chiqish uchun 'bekor qilish' deb yozing):",
-        parse_mode="Markdown"
-    )
-    await state.set_state(AdminState.waiting_for_ai_question)
-
-
-@dp.message(AdminState.waiting_for_ai_question)
-async def process_admin_ai_request(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMINS:
-        await state.clear()
-        return
-
-    user_query = message.text
-    
-    if user_query.lower() in ["/cancel", "bekor qilish", "⬅️ bosh menyu"]:
-        await state.clear()
-        await message.answer("AI tahlilchi rejimi yopildi.", reply_markup=admin_menu())
-        return
-
-    waiting_msg = await message.answer("🧠 AI ma'lumotlar jadvalini tahlil qilmoqda, iltimos kuting...")
-
-    try:
-        sheet = get_google_sheet()
-        all_data = sheet.get_all_values()
-        
-        if not all_data or len(all_data) < 2:
-            sheet_summary = "Hozircha bazada (Google Sheets) arizalar va ma'lumotlar mavjud emas."
-        else:
-            headers = all_data[0]
-            rows = all_data[1:]
-            df = pd.DataFrame(rows, columns=headers)
-            
-            if "Karta" in df.columns:
-                df["Karta"] = df["Karta"].apply(lambda x: f"{x[:4]}********{x[-4:]}" if len(str(x))==16 else x)
-                
-            sheet_summary = df.to_string(index=False)
-
-        system_instruction = (
-            "Siz Open Budget botining administratorlari uchun yordam beruvchi kuchli ma'lumotlar tahlilchisisiz. "
-            "Sizga quyida botning real vaqtdagi Google Sheets ma'lumotlari matn shaklida taqdim etiladi. "
-            "Admin bergan har qanday savolga ushbu jadval ma'lumotlariga suyanib, aniq, qisqa va raqamli faktlar bilan javob bering. "
-            "Agar savol reklama matni yoki e'lon yozish haqida bo'lsa, uni jozibali, odamlarni jalb qiladigan qilib yozing. "
-            "Javoblaringizni doimo chiroyli o'zbek tilida va qulay o'qilishi uchun Markdown formatida taqdim eting.\n\n"
-            f"Baza ma'lumotlari (Google Sheets jadvali):\n{sheet_summary}"
-        )
-
-        # 🟢 MUHIM O'ZGARISH: Model nomi hozirgi kunda eng barqaror va ishchi 'gemini-2.0-flash' ga o'rnatildi
-        response = ai_client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents=user_query,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.3  
-            )
-        )
-
-        await waiting_msg.delete()
-        
-        if len(response.text) > 4000:
-            for i in range(0, len(response.text), 4000):
-                await message.answer(response.text[i:i+4000], parse_mode="Markdown")
-        else:
-            await message.answer(response.text, parse_mode="Markdown")
-
-    except Exception as e:
-        try:
-            await waiting_msg.delete()
-        except: pass
-        await message.answer(f"❌ AI tahlil qilishda xatolikka uchradi: {e}")
-
-    await message.answer("👉 _Yana biror narsani tahlil qilaylikmi? (Chiqish uchun 'bekor qilish' deb yozing)_", parse_mode="Markdown")
 
 
 # --- BOTNI ISHGA TUSHIRISH ---
