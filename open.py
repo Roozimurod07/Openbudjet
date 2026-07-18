@@ -165,7 +165,7 @@ async def process_referral_info(message: types.Message):
     await message.answer(text, parse_mode="HTML", reply_markup=inline_kb.as_markup())
 
 
-# --- ADMIN PANELNI ACHISH BUYRUG'I ---
+# --- ADMIN PANELNI OCHISH BUYRUG'I ---
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
     if message.from_user.id in ADMINS:
@@ -463,7 +463,7 @@ async def process_screenshot(message: types.Message, state: FSMContext):
     try:
         await bot.send_photo(
             admin_id, photo_id,
-            caption=f"📸 <b>Ovoz berilganlik haqica Skrinshot keldi!</b>\n\n"
+            caption=f"📸 <b>Ovoz berilganlik haqida Skrinshot keldi!</b>\n\n"
                     f"👤 Kimdan: {data.get('full_name')}\n"
                     f"📞 Raqam: {data.get('phone')}\n\n"
                     f"Tekshirib qaror qabul qiling:",
@@ -475,7 +475,7 @@ async def process_screenshot(message: types.Message, state: FSMContext):
     await state.set_state(VoteState.waiting_for_admin_check)
 
 
-# --- ADMIN TEKSHIRUV NATIJALARI (CALLBACK) ---
+# --- ADMIN TEKSHIRUV NATIJALARI (CALLBACK - INTEGRATSIYA QILINGAN) ---
 @dp.callback_query(F.data.startswith("check_"))
 async def handle_admin_check(callback: types.CallbackQuery):
     action = callback.data.split("_")[1]
@@ -502,6 +502,19 @@ async def handle_admin_check(callback: types.CallbackQuery):
         await user_state.set_state(VoteState.waiting_for_card)
         await bot.send_message(user_id, "Tabriklaymiz! Ovozingiz muvaffaqiyatli tasdiqlandi. 🎉\n\nPlastik karta raqamingizni yuboring:")
 
+        # --- REFFERRERGA BILDIRISHNOMA YUBORISH ---
+        if referrer_id and referrer_id.isdigit():
+            try:
+                await bot.send_message(
+                    int(referrer_id),
+                    f"🎉 <b>Tabriklaymiz!</b>\n\n"
+                    f"Siz taklif qilgan do'stingiz (ID: <code>{user_id}</code>) muvaffaqiyatli ovoz berdi va tekshiruvdan o'tdi.\n"
+                    f"Hisobingizga bonus qo'shildi! 💸\n\n"
+                    f"Do'stlarni taklif qilishda davom eting!"
+                )
+            except Exception as e:
+                print(f"Referrerni xabardor qila olmadim: {e}")
+
     elif action == "already":
         log_to_sheets(user_id=user_id, phone=data.get("phone", ""), status="Avval ovoz bergan", admin_name=admin_name, referrer_id=referrer_id)
         try:
@@ -518,16 +531,16 @@ async def handle_admin_check(callback: types.CallbackQuery):
         await bot.send_message(user_id, "Uzr, tekshiruv davomida bu raqam orqali avval ham ovoz berilganligi aniqlandi. ❌", reply_markup=main_menu())
 
 
-# 🆕 --- KARTA RAQAM KIRITILGANDA (AUTO-FORMAT VA TEKSHIRUV BILAN) ---
+# --- KARTA RAQAM KIRITILGANDA (AUTO-FORMAT VA TEKSHIRUV BILAN) ---
 @dp.message(VoteState.waiting_for_card)
 async def process_card(message: types.Message, state: FSMContext):
     raw_card = message.text
     
-    # Karta raqami ichidagi har qanday probel, chiziqcha yoki ortiqcha belgilarni tozalaymiz
+    # Ortiqcha probellar, chiziqchalar yoki harflarni tozalaymiz
     clean_card = re.sub(r'\D', '', raw_card)
     
-    # Tekshiruv shartlari: uzunligi 16 ta bo'lishi va O'zbekiston kartalari prefixi bo'lishi kerak
-    valid_prefixes = ('8600', '5614', '9860', '4444', '6262') # Uzcard, Humo va ba'zi o'tkazma kartalari
+    # Uzcard, Humo va o'tkazma kartalari prefikslari
+    valid_prefixes = ('8600', '5614', '9860', '4444', '6262') 
     
     if len(clean_card) != 16 or not clean_card.startswith(valid_prefixes):
         await message.answer(
@@ -536,9 +549,8 @@ async def process_card(message: types.Message, state: FSMContext):
             "Misol: <code>8600123456789012</code>", 
             parse_mode="HTML"
         )
-        return  # State o'zgarmaydi, foydalanuvchi to'g'ri karta kiritguncha kutadi
+        return  # To'g'ri karta kiritilmaguncha shu stateda qoladi
 
-    # Agar tekshiruvdan muvaffaqiyatli o'tsa, jarayon davom etadi
     data = await state.get_data()
     admin_id = data.get("admin_id")
     user_id = message.from_user.id
