@@ -17,7 +17,7 @@ import openpyxl
 
 # --- SOZLAMALAR ---
 BOT_TOKEN = "8482178284:AAGzq9lzZEV6JlOkBA3_TvDcX37NQA_uB_M"
-ADMINS = [8317043750, 6139120765]  
+ADMINS = [8317043750]  
 
 PAYMENTS_GROUP_LINK = "https://t.me/isbot111"  
 GOOGLE_SHEET_NAME = "Openbudjet"  
@@ -82,7 +82,6 @@ class VoteState(StatesGroup):
     waiting_for_admin_check = State()  
     waiting_for_card = State()
 
-# 🆕 REKLAMA UCHUN YANGI STATE
 class AdminState(StatesGroup):
     waiting_for_broadcast_msg = State()
 
@@ -101,7 +100,7 @@ def main_menu():
 def admin_menu():
     builder = ReplyKeyboardBuilder()
     builder.button(text="📊 Hisobot (.xlsx)")
-    builder.button(text="📢 Xabar yuborish (Mailing)") # 🆕 Admin menyuga tugma qo'shildi
+    builder.button(text="📢 Xabar yuborish (Mailing)") 
     builder.button(text="⬅️ Bosh menyu")
     builder.adjust(1, 1, 1)
     return builder.as_markup(resize_keyboard=True)
@@ -134,7 +133,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     )
 
 
-# --- 👥 TAKLIFNOMALAR BO'LIMI (SANAGICH BILAN) ---
+# --- 👥 TAKLIFNOMALAR BO'LIMI ---
 @dp.message(F.text == "👥 Taklifnomalar (Referal)")
 async def process_referral_info(message: types.Message):
     user_id = message.from_user.id
@@ -170,7 +169,7 @@ async def process_referral_info(message: types.Message):
     await message.answer(text, parse_mode="HTML", reply_markup=inline_kb.as_markup())
 
 
-# --- ADMIN PANELNI OCHISH BUYRUG'I ---
+# --- ADMIN PANEL ---
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
     if message.from_user.id in ADMINS:
@@ -181,7 +180,7 @@ async def back_to_main(message: types.Message):
     await message.answer("Bosh menyuga qaytildi.", reply_markup=main_menu())
 
 
-# 🆕 --- XABAR YUBORISH (MAILING) BOSHQARUVI ---
+# --- XABAR YUBORISH (MAILING) ---
 @dp.message(F.text == "📢 Xabar yuborish (Mailing)")
 async def start_broadcast(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMINS:
@@ -211,9 +210,8 @@ async def process_broadcast_message(message: types.Message, state: FSMContext):
         sheet = get_google_sheet()
         all_rows = sheet.get_all_values()
         
-        # Jadvaldan faqat unikal User ID'larni yig'ib olamiz (1-ustun, index 0)
         user_ids = set()
-        for row in all_rows[1:]: # Birinchi qator sarlavha bo'lgani uchun tashlab ketiladi
+        for row in all_rows[1:]: 
             if row and row[0].isdigit():
                 user_ids.add(int(row[0]))
 
@@ -229,14 +227,12 @@ async def process_broadcast_message(message: types.Message, state: FSMContext):
         for u_id in user_ids:
             try:
                 if message.photo:
-                    # Agar rasm bo'lsa captions bilan yuboradi
                     photo_id = message.photo[-1].file_id
                     await bot.send_photo(chat_id=u_id, photo=photo_id, caption=message.caption, caption_entities=message.caption_entities)
                 else:
-                    # Agar faqat matn bo'lsa
                     await bot.send_message(chat_id=u_id, text=message.text, entities=message.entities)
                 success_count += 1
-                await asyncio.sleep(0.05) # Telegram bloklab qo'ymasligi uchun cheklov
+                await asyncio.sleep(0.05) 
             except Exception:
                 fail_count += 1
 
@@ -449,12 +445,17 @@ async def admin_claim(callback: types.CallbackQuery):
                 )
             except Exception: pass
 
+    # KOD KELMADI tugmasini chiqarish
+    resend_kb = InlineKeyboardBuilder()
+    resend_kb.button(text="🔄 Kod kelmadi (Qayta so'rash)", callback_data=f"resend_request_{user_id}")
+    
     msg = await bot.send_message(
         user_id,
         "Sizning raqamingiz tizimga kiritildi! 📥\n"
         "Telefoningizga kelgan <b>SMS kodni</b> kiriting.\n"
         "⚠️ Vaqtingiz: <b>2:00 daqiqa</b>",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=resend_kb.as_markup()
     )
     asyncio.create_task(countdown_timer(user_id, msg.message_id, user_state))
 
@@ -468,11 +469,16 @@ async def countdown_timer(user_id, message_id, state: FSMContext):
         if current_state != VoteState.waiting_for_code: return
 
         minutes, seconds = divmod(total_seconds, 60)
+        
+        resend_kb = InlineKeyboardBuilder()
+        resend_kb.button(text="🔄 Kod kelmadi (Qayta so'rash)", callback_data=f"resend_request_{user_id}")
+        
         try:
             await bot.edit_message_text(
                 chat_id=user_id, message_id=message_id,
                 text=f"Telefoningizga kelgan <b>SMS kodni</b> kiriting.\n⚠️ Qolgan vaqt: <b>{minutes:02d}:{seconds:02d} daqiqa</b>",
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_markup=resend_kb.as_markup()
             )
         except Exception: pass
 
@@ -489,7 +495,36 @@ async def countdown_timer(user_id, message_id, state: FSMContext):
         log_to_sheets(user_id=user_id, phone=user_data.get("phone", ""), status="Vaqt tugadi", referrer_id=user_data.get("referrer_id", ""))
 
 
-# --- KOD KIRITILGANDA ---
+# --- KOD KELMADI SINOVI (CALLBACK HANDLING) ---
+@dp.callback_query(F.data.startswith("resend_request_"))
+async def handle_resend_request(callback: types.CallbackQuery, state: FSMContext):
+    user_id = int(callback.data.split("_")[2])
+    
+    current_state = await state.get_state()
+    if current_state != VoteState.waiting_for_code:
+        await callback.answer("⚠️ Kech qoldingiz, bu seans yakunlangan.", show_alert=True)
+        return
+        
+    data = await state.get_data()
+    admin_id = data.get("admin_id")
+    phone = data.get("phone", "Noma'lum")
+    full_name = data.get("full_name", "Noma'lum")
+    
+    try:
+        await bot.send_message(
+            chat_id=admin_id,
+            text=f"🔔 <b>Qayta kod so'ralmoqda!</b>\n\n"
+                 f"👤 Foydalanuvchi: {full_name}\n"
+                 f"📞 Telefon: <code>{phone}</code>\n"
+                 f"⚠️ <i>Foydalanuvchiga SMS bormaganini aytyapti. Iltimos, saytdan qaytadan kod yuborish tugmasini bosing.</i>",
+            parse_mode="HTML"
+        )
+        await callback.answer("🔄 Adminga qayta yuborish so'rovi yetkazildi! Iltimos biroz kuting.", show_alert=True)
+    except Exception:
+        await callback.answer("❌ So'rovni yetkazishda muammo bo'ldi.", show_alert=True)
+
+
+# --- KOD KIRITILGANDA (YANGILANDI - TUGMALAR QO'SHILDI) ---
 @dp.message(VoteState.waiting_for_code)
 async def process_code(message: types.Message, state: FSMContext):
     code = message.text
@@ -502,22 +537,88 @@ async def process_code(message: types.Message, state: FSMContext):
     admin_name = claimed_admin_names.get(user_id, "Noma'lum")
     log_to_sheets(user_id=user_id, phone=data.get("phone", ""), code=code, status="Kod kiritildi", admin_name=admin_name, referrer_id=referrer_id)
 
+    # 🆕 Yangilik: Admin uchun "Kod to'g'ri" yoki "Kod xato" tugmalari
+    verify_kb = InlineKeyboardBuilder()
+    verify_kb.button(text="✅ Kod to'g'ri", callback_data=f"verify_correct_{user_id}")
+    verify_kb.button(text="❌ Kod xato", callback_data=f"verify_wrong_{user_id}")
+    verify_kb.adjust(2)
+
     try:
         await bot.send_message(
             admin_id,
             f"🔑 <b>Foydalanuvchidan Kod Keldi!</b>\n\n"
             f"👤 Kimdan: {data.get('full_name')}\n"
+            f"📞 Telefon: <code>{data.get('phone')}</code>\n"
             f"🔢 KOD: <code>{code}</code>\n\n"
-            f"Kodni kiritib bo'lgach, foydalanuvchiga tasdiqlash SMSi borishini kuting.",
-            parse_mode="HTML"
+            f"⚠️ <b>Kodni saytga kiriting va tekshirib tugmalardan birini bosing:</b>",
+            parse_mode="HTML",
+            reply_markup=verify_kb.as_markup()
         )
     except Exception: pass
 
-    await message.answer(
-        "Raqam muvaffaqiyatli tasdiqlandi! 💸\n\n"
-        "1 soat ichida sizga <b>'Sizning ovozingiz muvaffaqiyatli qabul qilindi'</b> degan sms boradi. O'sha smsni skrinshot qilib shu yerga yuboring."
-    )
-    await state.set_state(VoteState.waiting_for_screenshot)
+    await message.answer("Rahmat! Kod qabul qilindi va tekshiruvga yuborildi. Biroz kuting... ⏱")
+
+
+# 🆕 --- KODNI SAYTDAN TEKSHIRISH NATIJASI (CALLBACK HANDLING) ---
+@dp.callback_query(F.data.startswith("verify_"))
+async def handle_code_verification(callback: types.CallbackQuery):
+    parts = callback.data.split("_")
+    status = parts[1]   # correct yoki wrong
+    user_id = int(parts[2])
+    admin_id = callback.from_user.id
+    admin_name = callback.from_user.full_name
+
+    user_state = dp.fsm.resolve_context(bot, chat_id=user_id, user_id=user_id)
+    current_state = await user_state.get_state()
+    
+    if current_state != VoteState.waiting_for_code:
+        await callback.answer("⚠️ Bu sessiya allaqachon yakunlangan yoki o'zgargan.", show_alert=True)
+        return
+
+    data = await user_state.get_data()
+    referrer_id = data.get("referrer_id", "")
+
+    if status == "correct":
+        # 1. Google Sheets'da statusni yangilaymiz
+        log_to_sheets(user_id=user_id, phone=data.get("phone", ""), status="Kod tasdiqlandi (To'g'ri)", admin_name=admin_name, referrer_id=referrer_id)
+        
+        # 2. Admin xabarini yangilaymiz (tugmalarni o'chirib)
+        await callback.message.edit_text(
+            text=f"{callback.message.text}\n\n🟢 <b>Natija: Kod saytga muvaffaqiyatli kiritildi! (To'g'ri)</b>",
+            parse_mode="HTML", reply_markup=None
+        )
+        await callback.answer("Kod to'g'ri deb belgilandi!", show_alert=True)
+        
+        # 3. Foydalanuvchini skrinshot yuborish bosqichiga o'tkazamiz
+        await user_state.set_state(VoteState.waiting_for_screenshot)
+        await bot.send_message(
+            user_id,
+            "🎉 Ajoyib! Siz yuborgan kod muvaffaqiyatli tasdiqlandi.\n\n"
+            "Endi telefoningizga kelgan <b>'Sizning ovozingiz muvaffaqiyatli qabul qilindi'</b> degan SMSni skrinshot qilib shu yerga yuboring. 📸"
+        )
+
+    elif status == "wrong":
+        # 1. Google Sheets'da statusni xato deb yangilaymiz
+        log_to_sheets(user_id=user_id, phone=data.get("phone", ""), status="Kod xato kiritildi", admin_name=admin_name, referrer_id=referrer_id)
+        
+        # 2. Admin xabarini yangilaymiz
+        await callback.message.edit_text(
+            text=f"{callback.message.text}\n\n🔴 <b>Natija: Kod xato deb belgilandi va foydalanuvchiga qayta so'rov ketdi.</b>",
+            parse_mode="HTML", reply_markup=None
+        )
+        await callback.answer("Kod xato deb belgilandi!", show_alert=True)
+        
+        # 3. Foydalanuvchini xabardor qilib, uni shu bosqichda qoldiramiz (qayta kod kiritishi uchun yangi taymer yoki eslatma)
+        resend_kb = InlineKeyboardBuilder()
+        resend_kb.button(text="🔄 Kod kelmadi (Qayta so'rash)", callback_data=f"resend_request_{user_id}")
+        
+        await bot.send_message(
+            user_id,
+            "⚠️ <b>Afsuski, siz yuborgan kod sayt tomonidan rad etildi (Xato yoki eskirgan).</b>\n\n"
+            "Iltimos, SMS kodni tekshirib, **to'g'ri kodni qaytadan yozib yuboring**.",
+            parse_mode="HTML",
+            reply_markup=resend_kb.as_markup()
+        )
 
 
 # --- SKRINSHOT YUBORILGANDA ---
@@ -540,7 +641,7 @@ async def process_screenshot(message: types.Message, state: FSMContext):
     try:
         await bot.send_photo(
             admin_id, photo_id,
-            caption=f"📸 <b>Ovoz berilganlik haqica Skrinshot keldi!</b>\n\n"
+            caption=f"📸 <b>Ovoz berilganlik haqida Skrinshot keldi!</b>\n\n"
                     f"👤 Kimdan: {data.get('full_name')}\n"
                     f"📞 Raqam: {data.get('phone')}\n\n"
                     f"Tekshirib qaror qabul qiling:",
@@ -579,7 +680,6 @@ async def handle_admin_check(callback: types.CallbackQuery):
         await user_state.set_state(VoteState.waiting_for_card)
         await bot.send_message(user_id, "Tabriklaymiz! Ovozingiz muvaffaqiyatli tasdiqlandi. 🎉\n\nPlastik karta raqamingizni yuboring:")
 
-        # --- REFERRERGA BONUS XABARINI YUBORISH ---
         if referrer_id and referrer_id.isdigit():
             try:
                 await bot.send_message(
@@ -608,7 +708,7 @@ async def handle_admin_check(callback: types.CallbackQuery):
         await bot.send_message(user_id, "Uzr, tekshiruv davomida bu raqam orqali avval ham ovoz berilganligi aniqlandi. ❌", reply_markup=main_menu())
 
 
-# --- KARTA RAQAM KIRITILGANDA (AUTO-FORMAT VA TEKSHIRUV BILAN) ---
+# --- KARTA RAQAM KIRITILGANDA ---
 @dp.message(VoteState.waiting_for_card)
 async def process_card(message: types.Message, state: FSMContext):
     raw_card = message.text
