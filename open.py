@@ -414,7 +414,7 @@ async def process_phone(message: types.Message, state: FSMContext):
         except Exception:
             pass
 
-    await message.answer("Raqamingiz qabul qilindi. Operatorlarimiz tez orada uni tizimga kiritishadi, kuting...", reply_markup=main_menu())
+    await message.answer("Raqamingiz qabul qilindi. Operatorlarimiz tez orada onu tizimga kiritishadi, kuting...", reply_markup=main_menu())
 
 
 # --- 🔒 ADMIN BAND QILISH ---
@@ -822,9 +822,9 @@ async def process_admin_ai_request(message: types.Message, state: FSMContext):
             f"Baza ma'lumotlari (Google Sheets jadvali):\n{sheet_summary}"
         )
 
-        # 🟢 O'ZGARISH SHU YERDA: Model nomi eng oxirgi barqaror 'gemini-2.5-flash' ko'rinishida to'g'ri chaqirildi
+        # 🟢 MUHIM O'ZGARISH: Model nomi hozirgi kunda eng barqaror va ishchi 'gemini-2.0-flash' ga o'rnatildi
         response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-2.0-flash',
             contents=user_query,
             config=genai_types.GenerateContentConfig(
                 system_instruction=system_instruction,
