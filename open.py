@@ -15,7 +15,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import openpyxl 
 
-# 🆕 AI va Aqlli jadval tahlili uchun yangi kutubxonalar (requirements.txt ga qo'shilgan)
+# AI va Aqlli jadval tahlili uchun kutubxonalar
 from google import genai
 from google.genai import types as genai_types
 import pandas as pd
@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# 🆕 Google Gemini AI Klientini ishga tushiramiz (Railway variables'dan kalitni o'qiydi)
+# Google Gemini AI Klientini ishga tushiramiz (Railway variables'dan kalitni o'qiydi)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -93,7 +93,7 @@ class VoteState(StatesGroup):
 
 class AdminState(StatesGroup):
     waiting_for_broadcast_msg = State()
-    waiting_for_ai_question = State() # 🆕 AI bilan savol-javob qilish holati
+    waiting_for_ai_question = State()
 
 
 # --- KLAVIATURALAR ---
@@ -110,10 +110,10 @@ def main_menu():
 def admin_menu():
     builder = ReplyKeyboardBuilder()
     builder.button(text="📊 Hisobot (.xlsx)")
-    builder.button(text="🤖 AI Yordamchi (Tahlil)") # 🆕 Admin menyuga AI tugmasi qo'shildi
+    builder.button(text="🤖 AI Yordamchi (Tahlil)") 
     builder.button(text="📢 Xabar yuborish (Mailing)") 
     builder.button(text="⬅️ Bosh menyu")
-    builder.adjust(2, 1, 1) # Tugmalar tartibli joylashishi uchun
+    builder.adjust(2, 1, 1)
     return builder.as_markup(resize_keyboard=True)
 
 def phone_share_keyboard():
@@ -137,7 +137,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
             referrer_id = potential_referrer
             await state.update_data(referrer_id=referrer_id)
 
-    # Agar kirgan odam admin bo'lsa to'g'ridan-to'g'ri admin menyuni chiqarish
     if message.from_user.id in ADMINS:
         await message.answer("🔑 **Admin panelga xush kelibsiz!**", reply_markup=admin_menu())
     else:
@@ -513,7 +512,7 @@ async def countdown_timer(user_id, message_id, state: FSMContext):
         log_to_sheets(user_id=user_id, phone=user_data.get("phone", ""), status="Vaqt tugadi", referrer_id=user_data.get("referrer_id", ""))
 
 
-# --- KOD KELMADI SINOVI (CALLBACK HANDLING) ---
+# --- QAYTA KOD SO'ROVI ---
 @dp.callback_query(F.data.startswith("resend_request_"))
 async def handle_resend_request(callback: types.CallbackQuery, state: FSMContext):
     user_id = int(callback.data.split("_")[2])
@@ -576,7 +575,7 @@ async def process_code(message: types.Message, state: FSMContext):
     await message.answer("Rahmat! Kod qabul qilindi va tekshiruvga yuborildi. Biroz kuting... ⏱")
 
 
-# --- KODNI SAYTDAN TEKSHIRISH NATIJASI (CALLBACK HANDLING) ---
+# --- KODNI SAYTDAN TEKSHIRISH NATIJASI ---
 @dp.callback_query(F.data.startswith("verify_"))
 async def handle_code_verification(callback: types.CallbackQuery):
     parts = callback.data.split("_")
@@ -664,7 +663,7 @@ async def process_screenshot(message: types.Message, state: FSMContext):
     await state.set_state(VoteState.waiting_for_admin_check)
 
 
-# --- ADMIN TEKSHIRUV NATIJALARI (CALLBACK) ---
+# --- ADMIN TEKSHIRUV NATIJALARI ---
 @dp.callback_query(F.data.startswith("check_"))
 async def handle_admin_check(callback: types.CallbackQuery):
     action = callback.data.split("_")[1]
@@ -763,7 +762,7 @@ async def process_card(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# 🆕 ==================== FAQAT ADMINLAR UCHUN AI BILAN GAPLASHISH BOSQICHI ====================
+# 🛠 MODIFIKATSIYA QILINGAN AI BILAN GAPLASHISH QISMI
 
 @dp.message(F.text == "🤖 AI Yordamchi (Tahlil)")
 async def admin_ai_start(message: types.Message, state: FSMContext):
@@ -809,7 +808,6 @@ async def process_admin_ai_request(message: types.Message, state: FSMContext):
             rows = all_data[1:]
             df = pd.DataFrame(rows, columns=headers)
             
-            # Xavfsizlik: Karta raqamlarining o'rtasidagi raqamlarni yopamiz
             if "Karta" in df.columns:
                 df["Karta"] = df["Karta"].apply(lambda x: f"{x[:4]}********{x[-4:]}" if len(str(x))==16 else x)
                 
@@ -824,6 +822,7 @@ async def process_admin_ai_request(message: types.Message, state: FSMContext):
             f"Baza ma'lumotlari (Google Sheets jadvali):\n{sheet_summary}"
         )
 
+        # 🟢 O'ZGARISH SHU YERDA: Model nomi eng oxirgi barqaror 'gemini-2.5-flash' ko'rinishida to'g'ri chaqirildi
         response = ai_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=user_query,
