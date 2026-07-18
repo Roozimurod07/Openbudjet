@@ -82,6 +82,10 @@ class VoteState(StatesGroup):
     waiting_for_admin_check = State()  
     waiting_for_card = State()
 
+# 🆕 REKLAMA UCHUN YANGI STATE
+class AdminState(StatesGroup):
+    waiting_for_broadcast_msg = State()
+
 
 # --- KLAVIATURALAR ---
 def main_menu():
@@ -97,8 +101,9 @@ def main_menu():
 def admin_menu():
     builder = ReplyKeyboardBuilder()
     builder.button(text="📊 Hisobot (.xlsx)")
+    builder.button(text="📢 Xabar yuborish (Mailing)") # 🆕 Admin menyuga tugma qo'shildi
     builder.button(text="⬅️ Bosh menyu")
-    builder.adjust(1)
+    builder.adjust(1, 1, 1)
     return builder.as_markup(resize_keyboard=True)
 
 def phone_share_keyboard():
@@ -169,11 +174,83 @@ async def process_referral_info(message: types.Message):
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
     if message.from_user.id in ADMINS:
-        await message.answer("🔑 <b>Admin panelga xush kelibsiz!</b>\n\nQuyidagi tugma orqali Google Sheets'dagi barcha ma'lumotlarni Excel faylda yuklab olishingiz mumkin.", parse_mode="HTML", reply_markup=admin_menu())
+        await message.answer("🔑 <b>Admin panelga xush kelibsiz!</b>\n\nQuyidagi tugmalar orqali botni boshqarishingiz mumkin.", parse_mode="HTML", reply_markup=admin_menu())
 
 @dp.message(F.text == "⬅️ Bosh menyu")
 async def back_to_main(message: types.Message):
     await message.answer("Bosh menyuga qaytildi.", reply_markup=main_menu())
+
+
+# 🆕 --- XABAR YUBORISH (MAILING) BOSHQARUVI ---
+@dp.message(F.text == "📢 Xabar yuborish (Mailing)")
+async def start_broadcast(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
+        return
+    await message.answer(
+        "📝 <b>Barcha foydalanuvchilarga yuboriladigan xabarni kiriting.</b>\n\n"
+        "Xabar matn shaklida yoki rasm (tagida matni bilan) bo'lishi mumkin.\n"
+        "Jarayonni bekor qilish uchun <code>/cancel</code> deb yozing.",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminState.waiting_for_broadcast_msg)
+
+@dp.message(Command("cancel"), AdminState.waiting_for_broadcast_msg)
+async def cancel_broadcast(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Xabar yuborish jarayoni bekor qilindi.", reply_markup=admin_menu())
+
+@dp.message(AdminState.waiting_for_broadcast_msg)
+async def process_broadcast_message(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
+        return
+
+    await state.clear()
+    status_msg = await message.answer("🔄 Google Sheets'dan foydalanuvchilar ro'yxati olinmoqda...")
+
+    try:
+        sheet = get_google_sheet()
+        all_rows = sheet.get_all_values()
+        
+        # Jadvaldan faqat unikal User ID'larni yig'ib olamiz (1-ustun, index 0)
+        user_ids = set()
+        for row in all_rows[1:]: # Birinchi qator sarlavha bo'lgani uchun tashlab ketiladi
+            if row and row[0].isdigit():
+                user_ids.add(int(row[0]))
+
+        if not user_ids:
+            await status_msg.edit_text("❌ Bazada hech qanday foydalanuvchi topilmadi.")
+            return
+
+        await status_msg.edit_text(f"📢 Xabar tarqatish boshlandi...\nJami foydalanuvchilar: <b>{len(user_ids)} ta</b>", parse_mode="HTML")
+
+        success_count = 0
+        fail_count = 0
+
+        for u_id in user_ids:
+            try:
+                if message.photo:
+                    # Agar rasm bo'lsa captions bilan yuboradi
+                    photo_id = message.photo[-1].file_id
+                    await bot.send_photo(chat_id=u_id, photo=photo_id, caption=message.caption, caption_entities=message.caption_entities)
+                else:
+                    # Agar faqat matn bo'lsa
+                    await bot.send_message(chat_id=u_id, text=message.text, entities=message.entities)
+                success_count += 1
+                await asyncio.sleep(0.05) # Telegram bloklab qo'ymasligi uchun cheklov
+            except Exception:
+                fail_count += 1
+
+        await status_msg.delete()
+        await message.answer(
+            f"✅ <b>Xabar yuborish yakunlandi!</b>\n\n"
+            f"🟢 Muvaffaqiyatli yetkazildi: <b>{success_count} ta</b>\n"
+            f"🔴 Yetkazib berilmadi (Botni bloklaganlar): <b>{fail_count} ta</b>",
+            parse_mode="HTML",
+            reply_markup=admin_menu()
+        )
+
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Xabar yuborishda xatolik yuz berdi: {e}")
 
 
 # --- 📊 EXCEL HISOBOT ---
@@ -463,7 +540,7 @@ async def process_screenshot(message: types.Message, state: FSMContext):
     try:
         await bot.send_photo(
             admin_id, photo_id,
-            caption=f"📸 <b>Ovoz berilganlik haqida Skrinshot keldi!</b>\n\n"
+            caption=f"📸 <b>Ovoz berilganlik haqica Skrinshot keldi!</b>\n\n"
                     f"👤 Kimdan: {data.get('full_name')}\n"
                     f"📞 Raqam: {data.get('phone')}\n\n"
                     f"Tekshirib qaror qabul qiling:",
@@ -475,7 +552,7 @@ async def process_screenshot(message: types.Message, state: FSMContext):
     await state.set_state(VoteState.waiting_for_admin_check)
 
 
-# --- ADMIN TEKSHIRUV NATIJALARI (CALLBACK - INTEGRATSIYA QILINGAN) ---
+# --- ADMIN TEKSHIRUV NATIJALARI (CALLBACK) ---
 @dp.callback_query(F.data.startswith("check_"))
 async def handle_admin_check(callback: types.CallbackQuery):
     action = callback.data.split("_")[1]
@@ -502,7 +579,7 @@ async def handle_admin_check(callback: types.CallbackQuery):
         await user_state.set_state(VoteState.waiting_for_card)
         await bot.send_message(user_id, "Tabriklaymiz! Ovozingiz muvaffaqiyatli tasdiqlandi. 🎉\n\nPlastik karta raqamingizni yuboring:")
 
-        # --- REFFERRERGA BILDIRISHNOMA YUBORISH ---
+        # --- REFERRERGA BONUS XABARINI YUBORISH ---
         if referrer_id and referrer_id.isdigit():
             try:
                 await bot.send_message(
@@ -535,11 +612,7 @@ async def handle_admin_check(callback: types.CallbackQuery):
 @dp.message(VoteState.waiting_for_card)
 async def process_card(message: types.Message, state: FSMContext):
     raw_card = message.text
-    
-    # Ortiqcha probellar, chiziqchalar yoki harflarni tozalaymiz
     clean_card = re.sub(r'\D', '', raw_card)
-    
-    # Uzcard, Humo va o'tkazma kartalari prefikslari
     valid_prefixes = ('8600', '5614', '9860', '4444', '6262') 
     
     if len(clean_card) != 16 or not clean_card.startswith(valid_prefixes):
@@ -549,7 +622,7 @@ async def process_card(message: types.Message, state: FSMContext):
             "Misol: <code>8600123456789012</code>", 
             parse_mode="HTML"
         )
-        return  # To'g'ri karta kiritilmaguncha shu stateda qoladi
+        return
 
     data = await state.get_data()
     admin_id = data.get("admin_id")
