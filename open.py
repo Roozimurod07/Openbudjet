@@ -3,6 +3,7 @@ import logging
 import json
 import os
 import io
+import re
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
@@ -128,7 +129,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     )
 
 
-# 🆕 👥 TAKLIFNOMALAR BO'LIMI (SANAGICH BILAN)
+# --- 👥 TAKLIFNOMALAR BO'LIMI (SANAGICH BILAN) ---
 @dp.message(F.text == "👥 Taklifnomalar (Referal)")
 async def process_referral_info(message: types.Message):
     user_id = message.from_user.id
@@ -137,14 +138,12 @@ async def process_referral_info(message: types.Message):
     
     waiting_msg = await message.answer("🔄 Takliflaringiz soni hisoblanmoqda...")
     
-    # Google Sheets'dan ushbu foydalanuvchi nechta odam taklif qilganini sanaymiz
     referral_count = 0
     try:
         sheet = get_google_sheet()
         all_data = sheet.get_all_values()
         
         for row in all_data:
-            # 10-ustun (J ustuni) indexi 9 bo'ladi. Shu ustunda foydalanuvchi IDsi borligini tekshiramiz
             if len(row) >= 10 and row[9] == str(user_id):
                 referral_count += 1
     except Exception as e:
@@ -519,17 +518,34 @@ async def handle_admin_check(callback: types.CallbackQuery):
         await bot.send_message(user_id, "Uzr, tekshiruv davomida bu raqam orqali avval ham ovoz berilganligi aniqlandi. ❌", reply_markup=main_menu())
 
 
-# --- KARTA RAQAM KIRITILGANDA ---
+# 🆕 --- KARTA RAQAM KIRITILGANDA (AUTO-FORMAT VA TEKSHIRUV BILAN) ---
 @dp.message(VoteState.waiting_for_card)
 async def process_card(message: types.Message, state: FSMContext):
-    card_number = message.text
+    raw_card = message.text
+    
+    # Karta raqami ichidagi har qanday probel, chiziqcha yoki ortiqcha belgilarni tozalaymiz
+    clean_card = re.sub(r'\D', '', raw_card)
+    
+    # Tekshiruv shartlari: uzunligi 16 ta bo'lishi va O'zbekiston kartalari prefixi bo'lishi kerak
+    valid_prefixes = ('8600', '5614', '9860', '4444', '6262') # Uzcard, Humo va ba'zi o'tkazma kartalari
+    
+    if len(clean_card) != 16 or not clean_card.startswith(valid_prefixes):
+        await message.answer(
+            "⚠️ <b>Karta raqami xato kiritildi!</b>\n\n"
+            "Iltimos, faqat 16 xonali Uzcard yoki Humo karta raqamingizni qaytadan toza holatda yuboring.\n"
+            "Misol: <code>8600123456789012</code>", 
+            parse_mode="HTML"
+        )
+        return  # State o'zgarmaydi, foydalanuvchi to'g'ri karta kiritguncha kutadi
+
+    # Agar tekshiruvdan muvaffaqiyatli o'tsa, jarayon davom etadi
     data = await state.get_data()
     admin_id = data.get("admin_id")
     user_id = message.from_user.id
     referrer_id = data.get("referrer_id", "")
 
     admin_name = claimed_admin_names.get(user_id, "Noma'lum")
-    log_to_sheets(user_id=user_id, phone=data.get("phone", ""), card=card_number, status="Karta berildi (Yakunlandi)", admin_name=admin_name, referrer_id=referrer_id)
+    log_to_sheets(user_id=user_id, phone=data.get("phone", ""), card=clean_card, status="Karta berildi (Yakunlandi)", admin_name=admin_name, referrer_id=referrer_id)
 
     try:
         await bot.send_message(
@@ -537,7 +553,7 @@ async def process_card(message: types.Message, state: FSMContext):
             f"💳 <b>Karta Raqami Keldi!</b>\n\n"
             f"👤 Foydalanuvchi: {data.get('full_name')}\n"
             f"📞 Telefon: {data.get('phone')}\n"
-            f"💳 Karta: <code>{card_number}</code>\n\n"
+            f"💳 Karta: <code>{clean_card}</code>\n\n"
             f"To'lovni amalga oshiring.",
             parse_mode="HTML"
         )
