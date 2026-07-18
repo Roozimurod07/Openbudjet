@@ -4,6 +4,7 @@ import json
 import os
 import io
 import re
+import sqlite3
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
@@ -31,6 +32,43 @@ dp = Dispatcher(storage=MemoryStorage())
 claimed_users = {}
 claimed_admin_names = {}
 admin_message_ids = {}
+
+# --- FONDA START BOSGANLAR UCHUN SQLITE BAZA ---
+def init_db():
+    conn = sqlite3.connect("mailing_users.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def add_user_to_db(user_id):
+    try:
+        conn = sqlite3.connect("mailing_users.db")
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ SQLite xatolik (add): {e}")
+
+def get_all_db_users():
+    try:
+        conn = sqlite3.connect("mailing_users.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users")
+        users = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return users
+    except Exception as e:
+        print(f"❌ SQLite xatolik (get): {e}")
+        return []
+
+# Bot yuritilishi bilan bazani tekshirib olamiz
+init_db()
 
 
 # --- GOOGLE SHEETS ULANISH FUNKSIYASI ---
@@ -118,6 +156,10 @@ def phone_share_keyboard():
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()  
+    
+    # Faqat start bosgan foydalanuvchini fondagi bazaga qo'shamiz (Excelga yozilmaydi)
+    if message.from_user.id not in ADMINS:
+        add_user_to_db(message.from_user.id)
     
     args = message.text.split()
     referrer_id = ""
@@ -212,16 +254,11 @@ async def process_broadcast_message(message: types.Message, state: FSMContext):
         return
 
     await state.clear()
-    status_msg = await message.answer("🔄 Google Sheets'dan foydalanuvchilar ro'yxati olinmoqda...")
+    status_msg = await message.answer("🔄 Baza foydalanuvchilari yuklanmoqda...")
 
     try:
-        sheet = get_google_sheet()
-        all_rows = sheet.get_all_values()
-        
-        user_ids = set()
-        for row in all_rows[1:]: 
-            if row and row[0].isdigit():
-                user_ids.add(int(row[0]))
+        # Xabarni faqat SQLite bazamizdagi (start bosgan barcha) foydalanuvchilarga yuboramiz
+        user_ids = get_all_db_users()
 
         if not user_ids:
             await status_msg.edit_text("❌ Bazada hech qanday foydalanuvchi topilmadi.")
@@ -234,11 +271,15 @@ async def process_broadcast_message(message: types.Message, state: FSMContext):
 
         for u_id in user_ids:
             try:
+                # O'zimizga qayta yubormaymiz
+                if int(u_id) in ADMINS:
+                    continue
+                    
                 if message.photo:
                     photo_id = message.photo[-1].file_id
-                    await bot.send_photo(chat_id=u_id, photo=photo_id, caption=message.caption, caption_entities=message.caption_entities)
+                    await bot.send_photo(chat_id=int(u_id), photo=photo_id, caption=message.caption, caption_entities=message.caption_entities)
                 else:
-                    await bot.send_message(chat_id=u_id, text=message.text, entities=message.entities)
+                    await bot.send_message(chat_id=int(u_id), text=message.text, entities=message.entities)
                 success_count += 1
                 await asyncio.sleep(0.05) 
             except Exception:
