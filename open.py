@@ -258,7 +258,9 @@ def phone_share_keyboard():
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()  
     user_id = message.from_user.id
-    if user_id not in get_all_admins(): add_user_to_db(user_id)
+    
+    # Har qanday holatda foydalanuvchini bazaga qo'shish (Xabar hamma start bosgandan keyin borishi uchun)
+    add_user_to_db(user_id)
     
     args = message.text.split()
     if len(args) > 1 and args[1].isdigit() and int(args[1]) != user_id:
@@ -404,7 +406,7 @@ async def process_broadcast_message(message: types.Message, state: FSMContext):
     sc, fc = 0, 0
     for u_id in get_all_db_users():
         try:
-            if int(u_id) in get_all_admins(): continue
+            # 📌 MAILING TUZATILDI: Adminlarni tekshirib, tashlab ketadigan qator o'chirildi! Endi hammaga boradi.
             await bot.send_message(chat_id=int(u_id), text=message.text)
             sc += 1; await asyncio.sleep(0.05)
         except Exception: fc += 1
