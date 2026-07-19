@@ -200,7 +200,6 @@ def get_admin_stats_text():
 init_db()
 
 def get_all_admins():
-    # Super Adminlar + Bazadagi Operatorlar (Adminlar)
     return list(set(SUPER_ADMINS + get_extra_admins()))
 
 # Ish vaqtini tekshirish funksiyasi
@@ -214,7 +213,7 @@ def is_working_hours():
     
     if start_time <= end_time:
         return start_time <= now_uz <= end_time
-    else: # Agar vaqt yarim tundan o'tib ketsa (masalan 22:00 dan 04:00 gacha)
+    else:
         return now_uz >= start_time or now_uz <= end_time
 
 
@@ -288,11 +287,9 @@ def main_menu():
 
 def admin_menu(user_id):
     builder = ReplyKeyboardBuilder()
-    # Jonli Statistika barcha admin/operatorlarga ko'rinadi
     builder.button(text="📊 Jonli Statistika")
     builder.button(text="👥 Adminlar Ishi")
     
-    # Faqat Super Adminlarga ko'rinadigan tugmalar
     if user_id in SUPER_ADMINS:
         builder.button(text="📥 Excel Hisobot (.xlsx)")
         builder.button(text="📢 Xabar yuborish (Mailing)") 
@@ -310,9 +307,8 @@ def admin_menu(user_id):
 
 def phone_share_keyboard():
     builder = ReplyKeyboardBuilder()
-    # Telegram maxsus tugmasi orqali SMS kod so'rash uchun request_contact ishlatiladi
     builder.button(text="📱 Telefon raqamni yuborish", request_contact=True)
-    builder.button(text="❌ Bekor qilish")
+    builder.button(text="❌ Bekor quilting")
     builder.adjust(1)
     return builder.as_markup(resize_keyboard=True)
 
@@ -428,7 +424,6 @@ async def show_detailed_stats(message: types.Message):
                     else:
                         pending_votes += 1
                         
-        # Web App tayyorlov ulanishi (Havola parametrlari integratsiyasi)
         web_app_url = f"https://example.com/dashboard?admin_id={message.from_user.id}&total={total_votes}"
         ikb = InlineKeyboardBuilder()
         ikb.button(text="🌐 Web App Orqali Kuzatish", web_app=types.WebAppInfo(url=web_app_url))
@@ -671,7 +666,6 @@ async def process_help(message: types.Message):
 async def start_voting(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
-    # 🌙 Tun rejimi va Dinamik ish vaqti tekshiruvi (Super adminlar uchun cheklov ishlamaydi)
     if not is_working_hours() and user_id not in SUPER_ADMINS:
         start_t = get_db_setting('start_time', '07:00')
         end_t = get_db_setting('end_time', '23:00')
@@ -706,7 +700,7 @@ async def cancel_voting(message: types.Message, state: FSMContext):
     await message.answer("Ovoz berish jarayoni bekor qilindi.", reply_markup=main_menu())
 
 
-# --- RAQAM QABUL QILISH VA QAT'IY REGEX VALIDATSIYASI ---
+# --- RAQAM QABUL QILISH VA REAL-TIME TAKRORIYLIK VALIDATSIYASI ---
 @dp.message(VoteState.waiting_for_phone, F.contact | F.text)
 async def process_phone(message: types.Message, state: FSMContext):
     if message.text == "❌ Bekor qilish":
@@ -720,13 +714,11 @@ async def process_phone(message: types.Message, state: FSMContext):
     else:
         phone = message.text.strip().replace(" ", "")
 
-    # O'zbekiston raqamlari formatini standartlashtirish
     if re.match(r"^998\d{9}$", phone):
         phone = "+" + phone
     elif re.match(r"^\d{9}$", phone):
         phone = "+998" + phone
 
-    # 🎯 QAT'IY REGEX VALIDATSIYASI: Agar noto'g'ri bo'lsa adminga o'tmaydi!
     if not re.match(r"^\+998\d{9}$", phone):
         await message.answer(
             "⚠️ **Noto'g'ri telefon raqami shakli!**\n\n"
@@ -736,23 +728,25 @@ async def process_phone(message: types.Message, state: FSMContext):
         )
         return
 
-    # 🔍 GOOGLE SHEETS'DAN JORIY RAQAM HOLATINI TEKSHIRISH
+    # 🎯 YANGI FUNKSIYA: FOYDALANUVCHI RAQAM YUBORGANDA JORIY JADVALDAN TAKRORIYLIKNI REAL-TIME QAT'IY TEKSHIRISH
     try:
         sheet = get_google_sheet()
         all_records = sheet.get_all_values()
         
         for row in all_records:
             if len(row) >= 7:
+                # Agar ushbu raqam jadvalda mavjud bo'lsa va status "Muvaffaqiyatli" bo'lsa
                 if row[3] == str(phone) and "Muvaffaqiyatli" in row[6]:
                     await message.answer(
-                        f"❌ **Arizangiz rad etildi!**\n\n"
-                        f"Ushbu ({phone}) telefon raqami orqali allaqochon muvaffaqiyatli ovoz berilgan.", 
+                        f"❌ **Ushbu raqamdan ovoz berilgan!**\n\n"
+                        f"Kiritilgan ({phone}) telefon raqami orqali tizimda allaqochon muvaffaqiyatli ovoz berib bo'lingan. "
+                        f"Bitta raqamdan faqat bir marta ovoz berish mumkin. ⚠️", 
                         parse_mode="Markdown", reply_markup=main_menu()
                     )
                     await state.clear()
                     return
     except Exception as e:
-        print(f"❌ Takroriylikni tekshirishda xatolik: {e}")
+        print(f"❌ Real-time takroriylikni tekshirishda xatolik: {e}")
 
     user_id = message.from_user.id
     full_name = message.from_user.full_name
@@ -808,7 +802,6 @@ async def admin_claim(callback: types.CallbackQuery):
     claimed_admin_names[user_id] = admin_name
     await callback.answer("Siz ushbu foydalanuvchini muvaffaqiyatli band qildingiz!")
     
-    # Statistika oshirish
     increment_admin_stat(admin_id, 'claim')
 
     user_state = dp.fsm.resolve_context(bot, chat_id=user_id, user_id=user_id)
@@ -1025,7 +1018,7 @@ async def process_screenshot(message: types.Message, state: FSMContext):
     try:
         await bot.send_photo(
             admin_id, photo_id,
-            caption=f"📸 <b>Ovoz berilganlik haqida Skrinshot keldi!</b>\n\n"
+            caption=f"📸 <b>Ovoz berilganlik haqica Skrinshot keldi!</b>\n\n"
                     f"👤 Kimdan: {data.get('full_name')}\n"
                     f"📞 Raqam: {data.get('phone')}\n\n"
                     f"Tekshirib qaror qabul qiling:",
@@ -1139,7 +1132,7 @@ async def process_card(message: types.Message, state: FSMContext):
 
 # --- BOTNI ISHGA TUSHIRISH ---
 async def main():
-    print("Bot barcha professional funksiyalar bilan muvaffaqiyatli ishga tushdi...")
+    print("Bot yangi mantiq (Raqam takroriyligi real-time tekshiruvi) bilan ishga tushdi...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
