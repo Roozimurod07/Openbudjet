@@ -531,7 +531,7 @@ async def handle_code_verification(callback: types.CallbackQuery):
     if status == "correct":
         log_to_sheets(user_id=user_id, phone=data.get("phone"), status="Kod tasdiqlandi", admin_name=callback.from_user.full_name)
         await callback.message.edit_text("🟢 Kod to'g'ri deb belgilandi."); await u_state.set_state(VoteState.waiting_for_screenshot)
-        await bot.send_message(user_id, "🎉 Kod tasdiqlandi. SMS skrinshotini yuboring! 📸")
+        await bot.send_message(user_id, "🎉 Kod tasdiqlandi. Sizga 1 soat ichida ovoz tasdiqlanganligi haqida SMS xabar boradi. Shu SMSni skernsho qilib shu yerga yuboring. Bo'lmasa ovozingiz tasdiqlangan hisoblanmaydi va to'lov ham qilinmaydi!!! 📸")
     else:
         log_to_sheets(user_id=user_id, phone=data.get("phone"), status="Kod xato", admin_name=callback.from_user.full_name)
         await callback.message.edit_text("🔴 Kod xato deb belgilandi.")
