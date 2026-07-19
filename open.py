@@ -6,12 +6,14 @@ import io
 import re
 import sqlite3
 from datetime import datetime
+import pytz  # O'zbekiston vaqti bilan aniq ishlash uchun
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+
 import gspread
 import openpyxl 
 import pandas as pd
@@ -19,10 +21,11 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 # --- SOZLAMALAR ---
 BOT_TOKEN = "8482178284:AAGzq9lzZEV6JlOkBA3_TvDcX37NQA_uB_M"
-ADMINS = [8317043750]  
+SUPER_ADMINS = [8317043750]  # To'liq huquqli Super Adminlar
 
 PAYMENTS_GROUP_LINK = "https://t.me/isbot111"  
 GOOGLE_SHEET_NAME = "Openbudjet"  
+UZ_TZ = pytz.timezone('Asia/Tashkent')
 
 # --- LOGGING VA BOT INITIALIZATSIYASI ---
 logging.basicConfig(level=logging.INFO)
@@ -33,15 +36,44 @@ claimed_users = {}
 claimed_admin_names = {}
 admin_message_ids = {}
 
-# --- FONDA START BOSGANLAR UCHUN SQLITE BAZA ---
+# --- FONDA START BOSGANLAR VA ADMINLAR UCHUN SQLITE BAZA ---
 def init_db():
     conn = sqlite3.connect("mailing_users.db")
     cursor = conn.cursor()
+    # Foydalanuvchilar jadvali
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY
+            user_id INTEGER PRIMARY KEY,
+            joined_at TEXT
         )
     """)
+    # Qo'shimcha adminlar (Operatorlar) jadvali
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS extra_admins (
+            admin_id INTEGER PRIMARY KEY
+        )
+    """)
+    # Tizim sozlamalari (Ish vaqti uchun)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    # Standart ish vaqtini yozish (07:00 dan 23:00 gacha)
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('start_time', '07:00')")
+    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('end_time', '23:00')")
+    
+    # Adminlar statistikasi uchun jadval
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admin_stats (
+            admin_id INTEGER,
+            action_type TEXT,
+            count INTEGER DEFAULT 0,
+            PRIMARY KEY (admin_id, action_type)
+        )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -49,11 +81,12 @@ def add_user_to_db(user_id):
     try:
         conn = sqlite3.connect("mailing_users.db")
         cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+        now = datetime.now(UZ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("INSERT OR IGNORE INTO users (user_id, joined_at) VALUES (?, ?)", (user_id, now))
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"❌ SQLite xatolik (add): {e}")
+        print(f"❌ SQLite xatolik (add_user): {e}")
 
 def get_all_db_users():
     try:
@@ -64,11 +97,125 @@ def get_all_db_users():
         conn.close()
         return users
     except Exception as e:
-        print(f"❌ SQLite xatolik (get): {e}")
+        print(f"❌ SQLite xatolik (get_users): {e}")
         return []
 
-# Bot yuritilishi bilan bazani tekshirib olamiz
+def get_extra_admins():
+    try:
+        conn = sqlite3.connect("mailing_users.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT admin_id FROM extra_admins")
+        admins = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return admins
+    except Exception as e:
+        return []
+
+def add_extra_admin(admin_id):
+    try:
+        conn = sqlite3.connect("mailing_users.db")
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO extra_admins (admin_id) VALUES (?)", (admin_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except:
+        return False
+
+def remove_extra_admin(admin_id):
+    try:
+        conn = sqlite3.connect("mailing_users.db")
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM extra_admins WHERE admin_id = ?", (admin_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except:
+        return False
+
+def get_db_setting(key, default):
+    try:
+        conn = sqlite3.connect("mailing_users.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else default
+    except:
+        return default
+
+def set_db_setting(key, value):
+    try:
+        conn = sqlite3.connect("mailing_users.db")
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+        conn.close()
+        return True
+    except:
+        return False
+
+def increment_admin_stat(admin_id, action_type):
+    try:
+        conn = sqlite3.connect("mailing_users.db")
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO admin_stats (admin_id, action_type, count) 
+            VALUES (?, ?, 1)
+            ON CONFLICT(admin_id, action_type) DO UPDATE SET count = count + 1
+        """, (admin_id, action_type))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Statistika xatoligi: {e}")
+
+def get_admin_stats_text():
+    try:
+        conn = sqlite3.connect("mailing_users.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT admin_id, action_type, count FROM admin_stats")
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            return "Adminlar ish statistikasi: Hozircha ma'lumot yo'q."
+            
+        data = {}
+        for r in rows:
+            a_id, act, cnt = r
+            if a_id not in data: data[a_id] = {}
+            data[a_id][act] = cnt
+            
+        text = "📊 **Adminlar va Operatorlar Ish Statistikasi:**\n\n"
+        for a_id, acts in data.items():
+            text += f"👤 Admin ID: <code>{a_id}</code>\n"
+            text += f" ├ Band qilingan raqamlar: {acts.get('claim', 0)} ta\n"
+            text += f" ├ Tasdiqlangan (Muvaffaqiyatli): {acts.get('success', 0)} ta\n"
+            text += f" └ Rad etilgan (Avval ovoz bergan): {acts.get('already', 0)} ta\n\n"
+        return text
+    except:
+        return "Statistikani yuklab bo'lmadi."
+
+# Baza yuklanishi
 init_db()
+
+def get_all_admins():
+    # Super Adminlar + Bazadagi Operatorlar (Adminlar)
+    return list(set(SUPER_ADMINS + get_extra_admins()))
+
+# Ish vaqtini tekshirish funksiyasi
+def is_working_hours():
+    now_uz = datetime.now(UZ_TZ).time()
+    start_str = get_db_setting('start_time', '07:00')
+    end_str = get_db_setting('end_time', '23:00')
+    
+    start_time = datetime.strptime(start_str, "%H:%M").time()
+    end_time = datetime.strptime(end_str, "%H:%M").time()
+    
+    if start_time <= end_time:
+        return start_time <= now_uz <= end_time
+    else: # Agar vaqt yarim tundan o'tib ketsa (masalan 22:00 dan 04:00 gacha)
+        return now_uz >= start_time or now_uz <= end_time
 
 
 # --- GOOGLE SHEETS ULANISH FUNKSIYASI ---
@@ -88,7 +235,7 @@ def log_to_sheets(user_id, full_name="", username="", phone="", code="", card=""
     try:
         sheet = get_google_sheet()
         all_records = sheet.get_all_values()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now(UZ_TZ).strftime("%Y-%m-%d %H:%M:%S")
         username_str = f"@{username}" if username else "Mavjud emas"
         
         row_index = -1
@@ -123,6 +270,9 @@ class VoteState(StatesGroup):
 
 class AdminState(StatesGroup):
     waiting_for_broadcast_msg = State()
+    waiting_for_new_admin = State()
+    waiting_for_del_admin = State()
+    waiting_for_work_hours = State()
 
 
 # --- KLAVIATURALAR ---
@@ -136,16 +286,31 @@ def main_menu():
     return builder.as_markup(resize_keyboard=True)
 
 
-def admin_menu():
+def admin_menu(user_id):
     builder = ReplyKeyboardBuilder()
-    builder.button(text="📊 Hisobot (.xlsx)")
-    builder.button(text="📢 Xabar yuborish (Mailing)") 
+    # Jonli Statistika barcha admin/operatorlarga ko'rinadi
+    builder.button(text="📊 Jonli Statistika")
+    builder.button(text="👥 Adminlar Ishi")
+    
+    # Faqat Super Adminlarga ko'rinadigan tugmalar
+    if user_id in SUPER_ADMINS:
+        builder.button(text="📥 Excel Hisobot (.xlsx)")
+        builder.button(text="📢 Xabar yuborish (Mailing)") 
+        builder.button(text="⚙️ Ish Vaqtini Sozlash")
+        builder.button(text="➕ Admin Qo'shish")
+        builder.button(text="➖ Admin O'chirish")
+        
     builder.button(text="⬅️ Bosh menyu")
-    builder.adjust(2, 1)
+    
+    if user_id in SUPER_ADMINS:
+        builder.adjust(2, 2, 1, 2, 1)
+    else:
+        builder.adjust(2, 1)
     return builder.as_markup(resize_keyboard=True)
 
 def phone_share_keyboard():
     builder = ReplyKeyboardBuilder()
+    # Telegram maxsus tugmasi orqali SMS kod so'rash uchun request_contact ishlatiladi
     builder.button(text="📱 Telefon raqamni yuborish", request_contact=True)
     builder.button(text="❌ Bekor qilish")
     builder.adjust(1)
@@ -156,21 +321,21 @@ def phone_share_keyboard():
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()  
+    user_id = message.from_user.id
     
-    # Faqat start bosgan foydalanuvchini fondagi bazaga qo'shamiz (Excelga yozilmaydi)
-    if message.from_user.id not in ADMINS:
-        add_user_to_db(message.from_user.id)
+    if user_id not in get_all_admins():
+        add_user_to_db(user_id)
     
     args = message.text.split()
     referrer_id = ""
     if len(args) > 1:
         potential_referrer = args[1]
-        if potential_referrer.isdigit() and int(potential_referrer) != message.from_user.id:
+        if potential_referrer.isdigit() and int(potential_referrer) != user_id:
             referrer_id = potential_referrer
             await state.update_data(referrer_id=referrer_id)
 
-    if message.from_user.id in ADMINS:
-        await message.answer("🔑 **Admin panelga xush kelibsiz!**", reply_markup=admin_menu())
+    if user_id in get_all_admins():
+        await message.answer("🔑 **Admin panelga xush kelibsiz!**", reply_markup=admin_menu(user_id))
     else:
         await message.answer(
             "👋 Assalomu alaykum! Open Budget ovoz berish botiga xush kelibsiz.\n\n"
@@ -215,29 +380,169 @@ async def process_referral_info(message: types.Message):
     await message.answer(text, parse_mode="HTML", reply_markup=inline_kb.as_markup())
 
 
-# --- ADMIN PANEL ---
+# --- ADMIN PANEL & STRUKTURALARI ---
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
-    if message.from_user.id in ADMINS:
-        await message.answer("🔑 <b>Admin panelga xush kelibsiz!</b>\n\nQuyidagi tugmalar orqali botni boshqarishingiz mumkin.", parse_mode="HTML", reply_markup=admin_menu())
+    user_id = message.from_user.id
+    if user_id in get_all_admins():
+        await message.answer("🔑 <b>Admin panelga xush kelibsiz!</b>\n\nQuyidagi tugmalar orqali botni boshqarishingiz mumkin.", parse_mode="HTML", reply_markup=admin_menu(user_id))
 
 @dp.message(F.text == "⬅️ Bosh menyu")
 async def back_to_main(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
     await state.clear()
-    if message.from_user.id in ADMINS:
-        await message.answer("Admin menyusi:", reply_markup=admin_menu())
+    if user_id in get_all_admins():
+        await message.answer("Admin menyusi:", reply_markup=admin_menu(user_id))
     else:
         await message.answer("Bosh menyuga qaytildi.", reply_markup=main_menu())
 
 
-# --- XABAR YUBORISH (MAILING) ---
+# --- 📊 JONLI STATISTIKA (TUGMA) ---
+@dp.message(F.text == "📊 Jonli Statistika")
+async def show_detailed_stats(message: types.Message):
+    if message.from_user.id not in get_all_admins():
+        return
+        
+    waiting_msg = await message.answer("🔄 Real vaqtda SQLite va Sheets statistikasi hisoblanmoqda...")
+    
+    try:
+        db_users = len(get_all_db_users())
+        sheet = get_google_sheet()
+        all_rows = sheet.get_all_values()
+        
+        total_votes = 0
+        success_votes = 0
+        rejected_votes = 0
+        pending_votes = 0
+        
+        if len(all_rows) > 1:
+            data_rows = all_rows[1:]
+            total_votes = len(data_rows)
+            for row in data_rows:
+                if len(row) >= 7:
+                    status = row[6]
+                    if "Muvaffaqiyatli" in status:
+                        success_votes += 1
+                    elif "Avval ovoz bergan" in status or "rad" in status.lower():
+                        rejected_votes += 1
+                    else:
+                        pending_votes += 1
+                        
+        # Web App tayyorlov ulanishi (Havola parametrlari integratsiyasi)
+        web_app_url = f"https://example.com/dashboard?admin_id={message.from_user.id}&total={total_votes}"
+        ikb = InlineKeyboardBuilder()
+        ikb.button(text="🌐 Web App Orqali Kuzatish", web_app=types.WebAppInfo(url=web_app_url))
+                        
+        stats_text = (
+            "📊 **Jonli Real-Vaqt Statistikasi**\n\n"
+            f"👤 **Bot a'zolari (SQLite):** {db_users} ta\n"
+            f"📥 **Jami kelgan arizalar:** {total_votes} ta\n"
+            f"🟢 **Muvaffaqiyatli o'tgan:** {success_votes} ta\n"
+            f"🔴 **Avval ovoz berganlar:** {rejected_votes} ta\n"
+            f"🟡 **Kutilayotgan arizalar:** {pending_votes} ta\n\n"
+            f"⏰ Tizim ish vaqti: `{get_db_setting('start_time', '07:00')}` - `{get_db_setting('end_time', '23:00')}`"
+        )
+        await waiting_msg.delete()
+        await message.answer(stats_text, parse_mode="Markdown", reply_markup=ikb.as_markup())
+    except Exception as e:
+        await waiting_msg.edit_text(f"❌ Statistikada xatolik: {e}")
+
+@dp.message(F.text == "👥 Adminlar Ishi")
+async def show_admin_work_stats(message: types.Message):
+    if message.from_user.id not in get_all_admins():
+        return
+    text = get_admin_stats_text()
+    await message.answer(text, parse_mode="HTML")
+
+
+# --- ⚙️ ISH VAQTINI SOZLASH (DINAMIK) ---
+@dp.message(F.text == "⚙️ Ish Vaqtini Sozlash")
+async def set_hours_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in SUPER_ADMINS:
+        await message.answer("❌ Bu huquq faqat Super Adminlarga tegishli.")
+        return
+    current_time_setting = f"{get_db_setting('start_time', '07:00')} dan {get_db_setting('end_time', '23:00')} gacha"
+    await message.answer(
+        f"⚙️ Hozirgi ish vaqti: **{current_time_setting}**\n\n"
+        f"Yangi ish vaqti oralig'ini kiriting.\n"
+        f"Format: `08:00-22:00` (oraliq chiziq bilan yozing):",
+        parse_mode="Markdown"
+    )
+    await state.set_state(AdminState.waiting_for_work_hours)
+
+@dp.message(AdminState.waiting_for_work_hours)
+async def set_hours_finish(message: types.Message, state: FSMContext):
+    await state.clear()
+    text = message.text.strip()
+    match = re.match(r"^([0-1]?[0-9]|2[0-3]):[0-5][0-9]-([0-1]?[0-9]|2[0-3]):[0-5][0-9]$", text)
+    
+    if match:
+        start_h, end_h = text.split("-")
+        set_db_setting('start_time', start_h)
+        set_db_setting('end_time', end_h)
+        await message.answer(f"✅ Ish vaqti muvaffaqiyatli o'zgartirildi: **{start_h} dan {end_h} gacha**", parse_mode="Markdown", reply_markup=admin_menu(message.from_user.id))
+    else:
+        await message.answer("❌ Noto'g'ri format. Misol: `07:00-23:00` shaklida yozing.", parse_mode="Markdown", reply_markup=admin_menu(message.from_user.id))
+
+
+# --- ADMIN QO'SHISH VA O'CHIRISH MANTIQI ---
+@dp.message(F.text == "➕ Admin Qo'shish")
+async def add_admin_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in SUPER_ADMINS:
+        return
+    await message.answer("Yangi operator (admin) tayinlash uchun uning **Telegram ID** raqamini yuboring:")
+    await state.set_state(AdminState.waiting_for_new_admin)
+
+@dp.message(AdminState.waiting_for_new_admin)
+async def add_admin_finish(message: types.Message, state: FSMContext):
+    await state.clear()
+    target_id = message.text.strip()
+    if target_id.isdigit():
+        if add_extra_admin(int(target_id)):
+            await message.answer(f"✅ ID: {target_id} Operator (Admin) rollari ro'yxatiga qo'shildi.", reply_markup=admin_menu(message.from_user.id))
+        else:
+            await message.answer("❌ Xatolik yuz berdi. Qaytadan urinib ko'ring.")
+    else:
+        await message.answer("❌ ID raqam faqat raqamlardan iborat bo'lishi kerak.", reply_markup=admin_menu(message.from_user.id))
+
+@dp.message(F.text == "➖ Admin O'chirish")
+async def del_admin_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in SUPER_ADMINS:
+        return
+    
+    admins_list = get_extra_admins()
+    if not admins_list:
+        await message.answer("Hozirda hech qanday qo'shimcha operator yo'q.")
+        return
+        
+    text = "O'chirmoqchi bo'lgan operatorning **ID raqamini** yozib yuboring:\n\n📋 Hozirgi operatorlar:\n"
+    for a in admins_list:
+        text += f"• <code>{a}</code>\n"
+        
+    await message.answer(text, parse_mode="HTML")
+    await state.set_state(AdminState.waiting_for_del_admin)
+
+@dp.message(AdminState.waiting_for_del_admin)
+async def del_admin_finish(message: types.Message, state: FSMContext):
+    await state.clear()
+    target_id = message.text.strip()
+    if target_id.isdigit():
+        if remove_extra_admin(int(target_id)):
+            await message.answer(f"✅ Operator (ID: {target_id}) ro'yxatdan o'chirildi.", reply_markup=admin_menu(message.from_user.id))
+        else:
+            await message.answer("❌ Operator topilmadi yoki o'chirishda xatolik.", reply_markup=admin_menu(message.from_user.id))
+    else:
+        await message.answer("❌ ID raqam yuborishingiz kerak.", reply_markup=admin_menu(message.from_user.id))
+
+
+# --- XABAR YUBORISH (MAILING - FAQAT SUPER ADMIN) ---
 @dp.message(F.text == "📢 Xabar yuborish (Mailing)")
 async def start_broadcast(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMINS:
+    if message.from_user.id not in SUPER_ADMINS:
+        await message.answer("❌ Operatorlar xabar tarqatish huquqiga ega emas.")
         return
     await message.answer(
         "📝 <b>Barcha foydalanuvchilarga yuboriladigan xabarni kiriting.</b>\n\n"
-        "Xabar matn shaklida yoki rasm (tagida matni bilan) bo'lishi mumkin.\n"
         "Jarayonni bekor qilish uchun <code>/cancel</code> deb yozing.",
         parse_mode="HTML"
     )
@@ -246,20 +551,18 @@ async def start_broadcast(message: types.Message, state: FSMContext):
 @dp.message(Command("cancel"), AdminState.waiting_for_broadcast_msg)
 async def cancel_broadcast(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Xabar yuborish jarayoni bekor qilindi.", reply_markup=admin_menu())
+    await message.answer("Xabar yuborish jarayoni bekor qilindi.", reply_markup=admin_menu(message.from_user.id))
 
 @dp.message(AdminState.waiting_for_broadcast_msg)
 async def process_broadcast_message(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMINS:
+    if message.from_user.id not in SUPER_ADMINS:
         return
 
     await state.clear()
     status_msg = await message.answer("🔄 Baza foydalanuvchilari yuklanmoqda...")
 
     try:
-        # Xabarni faqat SQLite bazamizdagi (start bosgan barcha) foydalanuvchilarga yuboramiz
         user_ids = get_all_db_users()
-
         if not user_ids:
             await status_msg.edit_text("❌ Bazada hech qanday foydalanuvchi topilmadi.")
             return
@@ -271,8 +574,7 @@ async def process_broadcast_message(message: types.Message, state: FSMContext):
 
         for u_id in user_ids:
             try:
-                # O'zimizga qayta yubormaymiz
-                if int(u_id) in ADMINS:
+                if int(u_id) in get_all_admins():
                     continue
                     
                 if message.photo:
@@ -289,22 +591,21 @@ async def process_broadcast_message(message: types.Message, state: FSMContext):
         await message.answer(
             f"✅ <b>Xabar yuborish yakunlandi!</b>\n\n"
             f"🟢 Muvaffaqiyatli yetkazildi: <b>{success_count} ta</b>\n"
-            f"🔴 Yetkazib berilmadi (Botni bloklaganlar): <b>{fail_count} ta</b>",
-            parse_mode="HTML",
-            reply_markup=admin_menu()
+            f"🔴 Yetkazib berilmadi: <b>{fail_count} ta</b>",
+            parse_mode="HTML", reply_markup=admin_menu(message.from_user.id)
         )
-
     except Exception as e:
-        await status_msg.edit_text(f"❌ Xabar yuborishda xatolik yuz berdi: {e}")
+        await status_msg.edit_text(f"❌ Xatolik yuz berdi: {e}")
 
 
-# --- 📊 EXCEL HISOBOT ---
-@dp.message(F.text == "📊 Hisobot (.xlsx)")
+# --- 📥 EXCEL HISOBOT (FAQAT SUPER ADMIN) ---
+@dp.message(F.text == "📥 Excel Hisobot (.xlsx)")
 async def send_excel_report(message: types.Message):
-    if message.from_user.id not in ADMINS:
+    if message.from_user.id not in SUPER_ADMINS:
+        await message.answer("❌ Operatorlar Excel hisobotini yuklash huquqiga ega emas.")
         return
 
-    waiting_msg = await message.answer("🔄 Google Sheets'dan ma'lumotlar olinmoqda va Excel shakliga keltirilmoqda, iltimos kuting...")
+    waiting_msg = await message.answer("🔄 Google Sheets'dan ma'lumotlar olinmoqda, iltimos kuting...")
     
     try:
         sheet = get_google_sheet()
@@ -325,12 +626,12 @@ async def send_excel_report(message: types.Message):
         wb.save(excel_buffer)
         excel_buffer.seek(0)
         
-        file_name = f"OpenBudget_Hisobot_{datetime.now().strftime('%d_%m_%Y')}.xlsx"
+        file_name = f"OpenBudget_Hisobot_{datetime.now(UZ_TZ).strftime('%d_%m_%Y')}.xlsx"
         
         await waiting_msg.delete()
         await message.answer_document(
             document=types.BufferedInputFile(excel_buffer.getvalue(), filename=file_name),
-            caption=f"📊 <b>Barcha arizalar hisoboti</b>\n\n📅 Sana: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n✅ Yuklab olindi.",
+            caption=f"📊 <b>Barcha arizalar hisoboti</b>\n\n📅 Sana: {datetime.now(UZ_TZ).strftime('%Y-%m-%d %H:%M')}\n✅ Yuklab olindi.",
             parse_mode="HTML"
         )
     except Exception as e:
@@ -346,8 +647,7 @@ async def process_payments_info(message: types.Message):
     text = (
         "<b>💰 To'lovlar Muvaffaqiyati Guruhimiz!</b>\n\n"
         "Bizda hammasi shaffof va halol! ✅\n"
-        "Ovoz berib pullarini qabul qilib olgan barcha yurtdoshlarimizning to'lov cheklari (skrinshotlari) muntazam ravishda guruhimizga joylab boriladi.\n\n"
-        "👇 Pastdagi tugma orqali guruhimizga a'zo bo'ling va o'zingiz guvohi bo'ling:"
+        "Ovoz berib pullarini qabul qilib olgan barcha yurtdoshlarimizning to'lov cheklari muntazam ravishda guruhimizga joylab boriladi."
     )
     await message.answer(text, parse_mode="HTML", reply_markup=inline_kb.as_markup())
 
@@ -361,18 +661,28 @@ async def process_help(message: types.Message):
     text = (
         "<b>🙋‍♂️ Yordam ko'rsatish markazi</b>\n\n"
         "Sizda biror bir muammo yoki savollar tug'ildimi? 🤷‍♂️\n"
-        "• Kod kelmay qoldimi?\n"
-        "• To'lov kechikayaptimi?\n"
-        "• Tizimda xatolik beryaptimi?\n\n"
-        "Xavotir olmang! Quyidagi tugmanis bosib, bizning professional operatorimizga to'g'ridan-to'g'ri murojaat qilishingiz mumkin. Tez fursatda yordam beramiz! 👇"
+        "Xavotir olmang! Quyidagi tugmani bosib, operatorimizga murojaat qiling. 👇"
     )
     await message.answer(text, parse_mode="HTML", reply_markup=inline_kb.as_markup())
 
 
-# --- OVOZ BERISH START ---
+# --- OVOZ BERISH START & TUN REJIMI ---
 @dp.message(F.text == "🗳 Ovoz berish")
 async def start_voting(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    
+    # 🌙 Tun rejimi va Dinamik ish vaqti tekshiruvi (Super adminlar uchun cheklov ishlamaydi)
+    if not is_working_hours() and user_id not in SUPER_ADMINS:
+        start_t = get_db_setting('start_time', '07:00')
+        end_t = get_db_setting('end_time', '23:00')
+        await message.answer(
+            f"🌙 **Bot hozirda tun rejimi yoki qabuldan tashqari vaqtda!**\n\n"
+            f"Arizalar qabul qilish vaqti: **{start_t} dan {end_t} gacha**. "
+            f"Iltimos, belgilangan vaqtda qayta urunib ko'ring! 🕰", 
+            parse_mode="Markdown"
+        )
+        return
+
     user_data = await state.get_data()
     referrer_id = user_data.get("referrer_id", "")
     
@@ -396,7 +706,7 @@ async def cancel_voting(message: types.Message, state: FSMContext):
     await message.answer("Ovoz berish jarayoni bekor qilindi.", reply_markup=main_menu())
 
 
-# --- RAQAM QABUL QILISH ---
+# --- RAQAM QABUL QILISH VA QAT'IY REGEX VALIDATSIYASI ---
 @dp.message(VoteState.waiting_for_phone, F.contact | F.text)
 async def process_phone(message: types.Message, state: FSMContext):
     if message.text == "❌ Bekor qilish":
@@ -408,7 +718,41 @@ async def process_phone(message: types.Message, state: FSMContext):
         phone = message.contact.phone_number
         if not phone.startswith("+"): phone = "+" + phone
     else:
-        phone = message.text
+        phone = message.text.strip().replace(" ", "")
+
+    # O'zbekiston raqamlari formatini standartlashtirish
+    if re.match(r"^998\d{9}$", phone):
+        phone = "+" + phone
+    elif re.match(r"^\d{9}$", phone):
+        phone = "+998" + phone
+
+    # 🎯 QAT'IY REGEX VALIDATSIYASI: Agar noto'g'ri bo'lsa adminga o'tmaydi!
+    if not re.match(r"^\+998\d{9}$", phone):
+        await message.answer(
+            "⚠️ **Noto'g'ri telefon raqami shakli!**\n\n"
+            "Iltimos, raqamni aniq va to'g'ri formatda kiriting.\n"
+            "Misol: `+998901234567` yoki `901234567`", 
+            parse_mode="Markdown"
+        )
+        return
+
+    # 🔍 GOOGLE SHEETS'DAN JORIY RAQAM HOLATINI TEKSHIRISH
+    try:
+        sheet = get_google_sheet()
+        all_records = sheet.get_all_values()
+        
+        for row in all_records:
+            if len(row) >= 7:
+                if row[3] == str(phone) and "Muvaffaqiyatli" in row[6]:
+                    await message.answer(
+                        f"❌ **Arizangiz rad etildi!**\n\n"
+                        f"Ushbu ({phone}) telefon raqami orqali allaqochon muvaffaqiyatli ovoz berilgan.", 
+                        parse_mode="Markdown", reply_markup=main_menu()
+                    )
+                    await state.clear()
+                    return
+    except Exception as e:
+        print(f"❌ Takroriylikni tekshirishda xatolik: {e}")
 
     user_id = message.from_user.id
     full_name = message.from_user.full_name
@@ -428,7 +772,7 @@ async def process_phone(message: types.Message, state: FSMContext):
 
     admin_message_ids[user_id] = {}
     
-    for admin in ADMINS:
+    for admin in get_all_admins():
         try:
             msg = await bot.send_message(
                 admin,
@@ -437,7 +781,7 @@ async def process_phone(message: types.Message, state: FSMContext):
                 f"🌐 Username: @{username if username else 'yoq'}\n"
                 f"🆔 ID: <code>{user_id}</code>\n"
                 f"📞 Raqam: <code>{phone}</code>\n"
-                f"👥 Taklif qiluvchi ID: <code>{referrer_id if referrer_id else 'To\'g\'ridan-to\'g\'ri kirgan'}</code>\n\n"
+                f"👥 Taklif qiluvchi ID: <code>{referrer_id if referrer_id else 'To\'g\'ridan-to\'g\'ri'}</code>\n\n"
                 f"Kim birinchi bo'lib qabul qilsa, o'sha admin ishlaydi.",
                 parse_mode="HTML", reply_markup=builder.as_markup()
             )
@@ -463,6 +807,9 @@ async def admin_claim(callback: types.CallbackQuery):
     claimed_users[user_id] = admin_id
     claimed_admin_names[user_id] = admin_name
     await callback.answer("Siz ushbu foydalanuvchini muvaffaqiyatli band qildingiz!")
+    
+    # Statistika oshirish
+    increment_admin_stat(admin_id, 'claim')
 
     user_state = dp.fsm.resolve_context(bot, chat_id=user_id, user_id=user_id)
     await user_state.set_state(VoteState.waiting_for_code)
@@ -502,8 +849,7 @@ async def admin_claim(callback: types.CallbackQuery):
         "Sizning raqamingiz tizimga kiritildi! 📥\n"
         "Telefoningizga kelgan <b>SMS kodni</b> kiriting.\n"
         "⚠️ Vaqtingiz: <b>2:00 daqiqa</b>",
-        parse_mode="HTML",
-        reply_markup=resend_kb.as_markup()
+        parse_mode="HTML", reply_markup=resend_kb.as_markup()
     )
     asyncio.create_task(countdown_timer(user_id, msg.message_id, user_state))
 
@@ -525,8 +871,7 @@ async def countdown_timer(user_id, message_id, state: FSMContext):
             await bot.edit_message_text(
                 chat_id=user_id, message_id=message_id,
                 text=f"Telefoningizga kelgan <b>SMS kodni</b> kiriting.\n⚠️ Qolgan vaqt: <b>{minutes:02d}:{seconds:02d} daqiqa</b>",
-                parse_mode="HTML",
-                reply_markup=resend_kb.as_markup()
+                parse_mode="HTML", reply_markup=resend_kb.as_markup()
             )
         except Exception: pass
 
@@ -567,7 +912,7 @@ async def handle_resend_request(callback: types.CallbackQuery, state: FSMContext
                  f"⚠️ <i>Foydalanuvchiga SMS bormaganini aytyapti. Iltimos, saytdan qaytadan kod yuborish tugmasini bosing.</i>",
             parse_mode="HTML"
         )
-        await callback.answer("🔄 Adminga qayta yuborish so'rovi yetkazildi! Iltimos biroz kuting.", show_alert=True)
+        await callback.answer("🔄 Operatorga qayta yuborish so'rovi yetkazildi!", show_alert=True)
     except Exception:
         await callback.answer("❌ So'rovni yetkazishda muammo bo'ldi.", show_alert=True)
 
@@ -598,8 +943,7 @@ async def process_code(message: types.Message, state: FSMContext):
             f"📞 Telefon: <code>{data.get('phone')}</code>\n"
             f"🔢 KOD: <code>{code}</code>\n\n"
             f"⚠️ <b>Kodni saytga kiriting va tekshirib tugmalardan birini bosing:</b>",
-            parse_mode="HTML",
-            reply_markup=verify_kb.as_markup()
+            parse_mode="HTML", reply_markup=verify_kb.as_markup()
         )
     except Exception: pass
 
@@ -657,8 +1001,7 @@ async def handle_code_verification(callback: types.CallbackQuery):
             user_id,
             "⚠️ <b>Afsuski, siz yuborgan kod sayt tomonidan rad etildi (Xato yoki eskirgan).</b>\n\n"
             "Iltimos, SMS kodni tekshirib, **to'g'ri kodni qaytadan yozib yuboring**.",
-            parse_mode="HTML",
-            reply_markup=resend_kb.as_markup()
+            parse_mode="HTML", reply_markup=resend_kb.as_markup()
         )
 
 
@@ -682,7 +1025,7 @@ async def process_screenshot(message: types.Message, state: FSMContext):
     try:
         await bot.send_photo(
             admin_id, photo_id,
-            caption=f"📸 <b>Ovoz berilganlik haqica Skrinshot keldi!</b>\n\n"
+            caption=f"📸 <b>Ovoz berilganlik haqida Skrinshot keldi!</b>\n\n"
                     f"👤 Kimdan: {data.get('full_name')}\n"
                     f"📞 Raqam: {data.get('phone')}\n\n"
                     f"Tekshirib qaror qabul qiling:",
@@ -713,6 +1056,8 @@ async def handle_admin_check(callback: types.CallbackQuery):
 
     if action == "success":
         log_to_sheets(user_id=user_id, phone=data.get("phone", ""), status="Muvaffaqiyatli", admin_name=admin_name, referrer_id=referrer_id)
+        increment_admin_stat(admin_id, 'success')
+        
         try:
             await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n✅ <b>Qaror: Muvaffaqiyatli!</b>", parse_mode="HTML")
         except Exception: pass
@@ -727,14 +1072,15 @@ async def handle_admin_check(callback: types.CallbackQuery):
                     int(referrer_id),
                     f"🎉 <b>Tabriklaymiz!</b>\n\n"
                     f"Siz taklif qilgan do'stingiz (ID: <code>{user_id}</code>) muvaffaqiyatli ovoz berdi va tekshiruvdan o'tdi.\n"
-                    f"Hisobingizga bonus qo'shildi! 💸\n\n"
-                    f"Do'stlarni taklif qilishda davom eting!"
+                    f"Hisobingizga bonus qo'shildi! 💸"
                 )
             except Exception as e:
                 print(f"Referrerni xabardor qila olmadim: {e}")
 
     elif action == "already":
         log_to_sheets(user_id=user_id, phone=data.get("phone", ""), status="Avval ovoz bergan", admin_name=admin_name, referrer_id=referrer_id)
+        increment_admin_stat(admin_id, 'already')
+        
         try:
             await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n❌ <b>Qaror: Rad etildi (Avval ovoz bergan)</b>", parse_mode="HTML")
         except Exception: pass
@@ -760,8 +1106,7 @@ async def process_card(message: types.Message, state: FSMContext):
         await message.answer(
             "⚠️ <b>Karta raqami xato kiritildi!</b>\n\n"
             "Iltimos, faqat 16 xonali Uzcard yoki Humo karta raqamingizni qaytadan toza holatda yuboring.\n"
-            "Misol: <code>8600123456789012</code>", 
-            parse_mode="HTML"
+            "Misol: <code>8600123456789012</code>", parse_mode="HTML"
         )
         return
 
@@ -780,8 +1125,7 @@ async def process_card(message: types.Message, state: FSMContext):
             f"👤 Foydalanuvchi: {data.get('full_name')}\n"
             f"📞 Telefon: {data.get('phone')}\n"
             f"💳 Karta: <code>{clean_card}</code>\n\n"
-            f"To'lovni amalga oshiring.",
-            parse_mode="HTML"
+            f"To'lovni amalga oshiring.", parse_mode="HTML"
         )
     except Exception: pass
 
@@ -795,7 +1139,7 @@ async def process_card(message: types.Message, state: FSMContext):
 
 # --- BOTNI ISHGA TUSHIRISH ---
 async def main():
-    print("Bot muvaffaqiyatli ishga tushdi...")
+    print("Bot barcha professional funksiyalar bilan muvaffaqiyatli ishga tushdi...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
